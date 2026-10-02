@@ -1,4 +1,6 @@
 General:
+  mode: mapping
+  map_export_path: ""
   lid_topic: "/livox/lidar"
   imu_topic: "/livox/imu"
   save_path: "/home/zale/save_datas/"

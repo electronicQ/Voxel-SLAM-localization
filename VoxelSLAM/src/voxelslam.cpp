@@ -1,4 +1,9 @@
 #include "voxelslam.hpp"
+#include "mapping_capture.hpp"
+
+#include <new>
+#include <stdexcept>
+#include <unordered_set>
 
 using namespace std;
 
@@ -757,6 +762,7 @@ public:
 
   vector<string> sessionNames;
   string bagname, savepath;
+  string operation_mode, map_export_path;
   int is_save_map;
 
   VOXEL_SLAM(ros::NodeHandle &n)
@@ -771,12 +777,27 @@ public:
     n.param<string>("General/imu_topic", imu_topic, "/livox/imu");
     n.param<string>("General/bagname", bagname, "site3_handheld_4");
     n.param<string>("General/save_path", savepath, "");
+    n.param<string>("General/mode", operation_mode, "mapping");
+    n.param<string>("General/map_export_path", map_export_path, "");
     n.param<int>("General/lidar_type", feat.lidar_type, 0);
     n.param<double>("General/blind", feat.blind, 0.1);
     n.param<int>("General/point_filter_num", feat.point_filter_num, 3);
     n.param<vector<double>>("General/extrinsic_tran", vecT, vector<double>());
     n.param<vector<double>>("General/extrinsic_rota", vecR, vector<double>());
     n.param<int>("General/is_save_map", is_save_map, 0);
+
+    if(operation_mode != "mapping" && operation_mode != "localization")
+    {
+      ROS_FATAL_STREAM("Unknown General/mode '" << operation_mode
+                       << "'; expected 'mapping' or 'localization'.");
+      throw std::invalid_argument("unknown General/mode");
+    }
+    if(operation_mode != "mapping" && !map_export_path.empty())
+    {
+      ROS_FATAL_STREAM("General/map_export_path is only valid in mapping mode.");
+      throw std::invalid_argument(
+          "map_export_path is only valid in mapping mode");
+    }
 
     sub_imu = n.subscribe(imu_topic, 80000, imu_handler);
     if(feat.lidar_type == LIVOX)
@@ -1808,6 +1829,9 @@ public:
     pl_kdmap.reset(new pcl::PointCloud<PointType>);
     vector<STDescManager*> std_managers;
     PGO_Edges lp_edges;
+    SavedMap captured_map;
+    vector<pair<int, const Keyframe*>> captured_pose_sources;
+    bool map_export_capture_failed = false;
 
     double jud_default = 0.45, icp_eigval = 14;
     double ratio_drift = 0.05;
@@ -1978,6 +2002,39 @@ public:
 
       vector<STD> stds_vec;
       std_manager->GenerateSTDescs(plbtc, stds_vec, buf_base-1);
+      if(operation_mode == "mapping" && !map_export_path.empty())
+      {
+        string capture_error;
+        SavedPose captured_pose;
+        captured_pose.stamp = smp->x0.t;
+        captured_pose.R = smp->x0.R;
+        captured_pose.t = smp->x0.p;
+        int capture_id = -1;
+        bool association_ready = true;
+        try
+        {
+          if(captured_pose_sources.size() == captured_pose_sources.capacity())
+            captured_pose_sources.reserve(captured_pose_sources.size() + 1024);
+        }
+        catch(const std::bad_alloc&)
+        {
+          capture_error = "out of memory while reserving final-pose associations";
+          association_ready = false;
+        }
+        if(!association_ready ||
+           !captureAcceptedKeyframe(
+               true, captured_pose, smp->plptr, stds_vec,
+               std_manager->plane_cloud_vec_.back(), captured_map, capture_id,
+               capture_error))
+        {
+          ROS_FATAL_STREAM("Map-package keyframe capture failed: "
+                           << capture_error);
+          map_export_capture_failed = true;
+          ros::shutdown();
+          break;
+        }
+        captured_pose_sources.push_back(make_pair(capture_id, smp));
+      }
       pair<int, double> search_result(-1, 0);
       pair<Eigen::Vector3d, Eigen::Matrix3d> loop_transform;
       vector<pair<STD, STD>> loop_std_pair;
@@ -2203,6 +2260,75 @@ public:
       build_graph(initial, graph, cur_id, lp_edges, odom_noise, ids, stepsizes, 0);
 
       topDownProcess(initial, graph, ids, stepsizes);
+    }
+
+    if(is_finish && operation_mode == "mapping" &&
+       !map_export_path.empty() && !map_export_capture_failed)
+    {
+      string export_error;
+      vector<CapturedPoseUpdate> pose_updates;
+      unordered_set<const Keyframe*> unique_pose_sources;
+      if(captured_map.keyframes.empty())
+      {
+        export_error = "no accepted fused keyframes were captured";
+      }
+      try
+      {
+        pose_updates.reserve(captured_pose_sources.size());
+        unique_pose_sources.reserve(captured_pose_sources.size());
+        for(const pair<int, const Keyframe*> &association:
+            captured_pose_sources)
+        {
+          if(association.second == nullptr)
+          {
+            export_error = "final-pose association contains a null keyframe";
+            break;
+          }
+          if(!unique_pose_sources.insert(association.second).second)
+          {
+            export_error =
+                "final-pose association contains a duplicate keyframe";
+            break;
+          }
+          CapturedPoseUpdate update;
+          update.capture_id = association.first;
+          update.pose.stamp = association.second->x0.t;
+          update.pose.R = association.second->x0.R;
+          update.pose.t = association.second->x0.p;
+          pose_updates.push_back(update);
+        }
+      }
+      catch(const std::bad_alloc&)
+      {
+        export_error = "out of memory while preparing final keyframe poses";
+      }
+      if(!export_error.empty() ||
+         !refreshCapturedKeyframePoses(
+             pose_updates, captured_map, export_error))
+      {
+        ROS_ERROR_STREAM("Map-package export aborted before save: "
+                         << export_error);
+      }
+      else
+      {
+        MapPackageOptions export_options;
+        export_options.win_size = win_size;
+        export_options.keyframe_distance_m = 0.1;
+        export_options.keyframe_angle_deg = 5.0;
+        export_options.keyframe_voxel_size = voxel_size / 10.0;
+        export_options.btc_config = config_setting;
+        if(MapPackageIO::save(map_export_path, captured_map, export_options,
+                              export_error))
+        {
+          ROS_INFO_STREAM("Saved optimized map package to "
+                          << map_export_path << " with "
+                          << captured_map.keyframes.size() << " keyframes.");
+        }
+        else
+        {
+          ROS_ERROR_STREAM("Map-package export failed: " << export_error);
+        }
+      }
     }
 
     if(is_save_map)
