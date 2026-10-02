@@ -100,6 +100,17 @@ if(CATKIN_ENABLE_TESTING)
       ${PCL_LIBRARIES}
     )
   endif()
+
+  catkin_add_gtest(prior_map_index_test
+    test/prior_map_index_test.cpp
+  )
+  if(TARGET prior_map_index_test)
+    target_link_libraries(prior_map_index_test
+      voxel_slam_map_io
+      ${catkin_LIBRARIES}
+      ${PCL_LIBRARIES}
+    )
+  endif()
 endif()
 
 
