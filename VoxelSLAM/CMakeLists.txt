@@ -46,16 +46,26 @@ include_directories(
 )
 
 add_library(voxel_slam_map_io
+  src/BTC.cpp
   src/map_package.cpp
   src/btc_io.cpp
 )
 target_include_directories(voxel_slam_map_io PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
-target_link_libraries(voxel_slam_map_io ${PCL_LIBRARIES} ${Boost_LIBRARIES})
+target_link_libraries(voxel_slam_map_io
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${Boost_LIBRARIES}
+)
 
-add_executable(voxelslam src/voxelslam.cpp src/BTC.cpp)
-target_link_libraries(voxelslam ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtsam)
+add_executable(voxelslam src/voxelslam.cpp)
+target_link_libraries(voxelslam
+  voxel_slam_map_io
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  gtsam
+)
 
 if(CATKIN_ENABLE_TESTING)
   catkin_add_gtest(map_package_roundtrip_test
@@ -70,7 +80,6 @@ if(CATKIN_ENABLE_TESTING)
 
   catkin_add_gtest(btc_io_roundtrip_test
     test/btc_io_roundtrip_test.cpp
-    src/BTC.cpp
   )
   if(TARGET btc_io_roundtrip_test)
     target_link_libraries(btc_io_roundtrip_test
