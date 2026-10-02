@@ -1,5 +1,7 @@
 #include "map_package.hpp"
 
+#include "btc_io.hpp"
+
 #include <boost/filesystem.hpp>
 #include <boost/system/error_code.hpp>
 #include <Eigen/Geometry>
@@ -14,6 +16,7 @@
 #include <limits>
 #include <locale>
 #include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -27,6 +30,8 @@ namespace fs = boost::filesystem;
 const char kManifestFile[] = "manifest.yaml";
 const char kKeyframesFile[] = "keyframes.csv";
 const char kKeyframesDirectory[] = "keyframes";
+const char kBtcFramesFile[] = "btc_frames.bin";
+const char kBtcPlanesDirectory[] = "btc_planes";
 const char kCsvHeader[] =
     "kf_id,timestamp,tx,ty,tz,qx,qy,qz,qw,cloud_file";
 
@@ -200,6 +205,68 @@ std::string cloudRelativePath(int id) {
   return path.str();
 }
 
+std::string btcPlaneRelativePath(int id) {
+  std::ostringstream path;
+  path.imbue(std::locale::classic());
+  path << kBtcPlanesDirectory << '/' << std::setfill('0') << std::setw(6)
+       << id << ".pcd";
+  return path.str();
+}
+
+bool planePointIsFinite(const pcl::PointXYZINormal &point) {
+  return std::isfinite(point.x) && std::isfinite(point.y) &&
+         std::isfinite(point.z) && std::isfinite(point.intensity) &&
+         std::isfinite(point.normal_x) && std::isfinite(point.normal_y) &&
+         std::isfinite(point.normal_z) && std::isfinite(point.curvature);
+}
+
+bool validateBtcMetadata(const std::vector<SavedBtcFrame> &frames,
+                         std::size_t keyframe_count, std::string &error) {
+  for (std::size_t index = 0; index < frames.size(); ++index) {
+    const SavedBtcFrame &frame = frames[index];
+    if (index > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        frame.frame_id != static_cast<int>(index)) {
+      return fail(error, "BTC frame IDs must be contiguous from 0; expected " +
+                             std::to_string(index) + ", found " +
+                             std::to_string(frame.frame_id));
+    }
+    if (frame.anchor_keyframe_id < 0 ||
+        static_cast<std::size_t>(frame.anchor_keyframe_id) >= keyframe_count) {
+      return fail(error, "BTC frame " + std::to_string(frame.frame_id) +
+                             " anchor keyframe ID is outside saved keyframes: " +
+                             std::to_string(frame.anchor_keyframe_id));
+    }
+  }
+  return true;
+}
+
+bool validateBtcPlane(const SavedBtcFrame &frame, std::string &error) {
+  if (!frame.plane_cloud) {
+    return fail(error, "BTC frame " + std::to_string(frame.frame_id) +
+                           " has no plane cloud");
+  }
+  for (std::size_t index = 0; index < frame.plane_cloud->size(); ++index) {
+    if (!planePointIsFinite(frame.plane_cloud->points[index])) {
+      return fail(error, "BTC frame " + std::to_string(frame.frame_id) +
+                             " plane point " + std::to_string(index) +
+                             " has a non-finite field");
+    }
+  }
+  return true;
+}
+
+bool validateBtcFramesForSave(const SavedMap &map, std::string &error) {
+  if (!validateBtcMetadata(map.btc_frames, map.keyframes.size(), error)) {
+    return false;
+  }
+  for (const SavedBtcFrame &frame : map.btc_frames) {
+    if (!validateBtcPlane(frame, error)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 class TemporaryDirectoryGuard {
  public:
   explicit TemporaryDirectoryGuard(fs::path path)
@@ -239,7 +306,7 @@ bool writeManifest(const fs::path &path, const SavedMap &map,
          << "descriptor_policy: one_per_fused_keyframe\n"
          << "btc_config_fingerprint: " << fingerprint << '\n'
          << "keyframe_count: " << map.keyframes.size() << '\n'
-         << "btc_frame_count: 0\n";
+         << "btc_frame_count: " << map.btc_frames.size() << '\n';
   output.close();
   if (!output) {
     return fail(error, "failed writing manifest: " + path.string());
@@ -303,6 +370,28 @@ bool writeKeyframes(const fs::path &temporary_directory, const SavedMap &map,
   csv.close();
   if (!csv) {
     return fail(error, "failed closing keyframe CSV: " + csv_path.string());
+  }
+  return true;
+}
+
+bool writeBtcArtifacts(const fs::path &temporary_directory,
+                       const SavedMap &map, std::string &error) {
+  const fs::path planes_directory =
+      temporary_directory / kBtcPlanesDirectory;
+  if (!fs::create_directory(planes_directory)) {
+    return fail(error, "cannot create temporary BTC plane directory");
+  }
+  if (!save_btc_frames((temporary_directory / kBtcFramesFile).string(),
+                       map.btc_frames, error)) {
+    return false;
+  }
+  for (const SavedBtcFrame &frame : map.btc_frames) {
+    const std::string relative_path = btcPlaneRelativePath(frame.frame_id);
+    const fs::path plane_path = temporary_directory / fs::path(relative_path);
+    if (pcl::io::savePCDFileBinary(plane_path.string(), *frame.plane_cloud) <
+        0) {
+      return fail(error, "failed writing BTC plane cloud: " + relative_path);
+    }
   }
   return true;
 }
@@ -393,6 +482,7 @@ bool parseManifestDouble(const std::map<std::string, std::string> &values,
 
 bool validateManifest(const std::map<std::string, std::string> &values,
                       const MapPackageOptions &options, int &keyframe_count,
+                       int &btc_frame_count,
                       std::string &error) {
   if (!expectManifestValue(values, "format", "voxel_slam_map", error) ||
       !expectManifestValue(values, "version", "1", error) ||
@@ -404,7 +494,6 @@ bool validateManifest(const std::map<std::string, std::string> &values,
   }
 
   int win_size = 0;
-  int btc_frame_count = 0;
   double keyframe_distance_m = 0.0;
   double keyframe_angle_deg = 0.0;
   double keyframe_voxel_size = 0.0;
@@ -421,9 +510,6 @@ bool validateManifest(const std::map<std::string, std::string> &values,
   }
   if (keyframe_count < 0 || btc_frame_count < 0) {
     return fail(error, "manifest counts must be non-negative");
-  }
-  if (btc_frame_count != 0) {
-    return fail(error, "BTC frame IO is not supported by map format task 1");
   }
   if (win_size != options.win_size) {
     return fail(error, "manifest win_size does not match load options");
@@ -545,6 +631,82 @@ bool loadKeyframes(const fs::path &directory, int expected_count,
   return true;
 }
 
+bool loadBtcArtifacts(const fs::path &directory, int expected_count,
+                      std::size_t keyframe_count, SavedMap &loaded,
+                      std::string &error) {
+  const fs::path frames_path = directory / kBtcFramesFile;
+  const fs::path planes_directory = directory / kBtcPlanesDirectory;
+  const bool frames_exist = fs::exists(frames_path);
+  const bool planes_exist = fs::exists(planes_directory);
+  if (expected_count == 0 && !frames_exist && !planes_exist) {
+    return true;
+  }
+  if (!fs::is_regular_file(frames_path)) {
+    return fail(error, "missing BTC binary: " + std::string(kBtcFramesFile));
+  }
+  if (!fs::is_directory(planes_directory)) {
+    return fail(error, "missing BTC plane directory: " +
+                           std::string(kBtcPlanesDirectory));
+  }
+
+  std::vector<SavedBtcFrame> frames;
+  if (!load_btc_frames(frames_path.string(), frames, error)) {
+    return false;
+  }
+  if (frames.size() != static_cast<std::size_t>(expected_count)) {
+    return fail(error, "BTC frame count mismatch: manifest declares " +
+                           std::to_string(expected_count) +
+                           ", binary contains " +
+                           std::to_string(frames.size()));
+  }
+  if (!validateBtcMetadata(frames, keyframe_count, error)) {
+    return false;
+  }
+
+  std::set<std::string> expected_files;
+  for (const SavedBtcFrame &frame : frames) {
+    expected_files.insert(fs::path(btcPlaneRelativePath(frame.frame_id))
+                              .filename()
+                              .string());
+  }
+  for (fs::directory_iterator entry(planes_directory), end; entry != end;
+       ++entry) {
+    const std::string filename = entry->path().filename().string();
+    if (expected_files.erase(filename) == 0) {
+      return fail(error, "unexpected BTC plane path: " +
+                             std::string(kBtcPlanesDirectory) + '/' +
+                             filename);
+    }
+    if (!fs::is_regular_file(entry->path())) {
+      return fail(error, "BTC plane path is not a regular file: " +
+                             std::string(kBtcPlanesDirectory) + '/' +
+                             filename);
+    }
+  }
+  if (!expected_files.empty()) {
+    return fail(error, "missing BTC plane cloud: " +
+                           std::string(kBtcPlanesDirectory) + '/' +
+                           *expected_files.begin());
+  }
+
+  for (SavedBtcFrame &frame : frames) {
+    const std::string relative_path = btcPlaneRelativePath(frame.frame_id);
+    const fs::path plane_path = directory / fs::path(relative_path);
+    frame.plane_cloud.reset(new pcl::PointCloud<pcl::PointXYZINormal>());
+    if (pcl::io::loadPCDFile<pcl::PointXYZINormal>(plane_path.string(),
+                                                   *frame.plane_cloud) < 0) {
+      return fail(error, "failed reading BTC plane cloud: " + relative_path);
+    }
+    if (!validateBtcPlane(frame, error)) {
+      return false;
+    }
+    frame.plane_cloud->header.seq =
+        static_cast<std::uint32_t>(frame.anchor_keyframe_id);
+  }
+  loaded.btc_frames = std::move(frames);
+  return true;
+}
+
 }  // namespace
 
 std::string btc_config_fingerprint(const ConfigSetting &config) {
@@ -565,10 +727,10 @@ bool MapPackageIO::save(const std::string &directory, const SavedMap &map,
     if (!validateOptions(options, error)) {
       return false;
     }
-    if (!map.btc_frames.empty()) {
-      return fail(error, "BTC frame IO is deferred until task 2");
-    }
     if (!validateKeyframesForSave(map, error)) {
+      return false;
+    }
+    if (!validateBtcFramesForSave(map, error)) {
       return false;
     }
 
@@ -605,7 +767,8 @@ bool MapPackageIO::save(const std::string &directory, const SavedMap &map,
     }
     if (!writeManifest(temporary_directory / kManifestFile, map, options,
                        fingerprint, error) ||
-        !writeKeyframes(temporary_directory, map, error)) {
+        !writeKeyframes(temporary_directory, map, error) ||
+        !writeBtcArtifacts(temporary_directory, map, error)) {
       return false;
     }
 
@@ -639,12 +802,18 @@ bool MapPackageIO::load(const std::string &directory, SavedMap &map,
       return false;
     }
     int keyframe_count = 0;
-    if (!validateManifest(manifest, options, keyframe_count, error)) {
+    int btc_frame_count = 0;
+    if (!validateManifest(manifest, options, keyframe_count, btc_frame_count,
+                          error)) {
       return false;
     }
 
     SavedMap loaded;
     if (!loadKeyframes(package_directory, keyframe_count, loaded, error)) {
+      return false;
+    }
+    if (!loadBtcArtifacts(package_directory, btc_frame_count,
+                          loaded.keyframes.size(), loaded, error)) {
       return false;
     }
     map = std::move(loaded);
