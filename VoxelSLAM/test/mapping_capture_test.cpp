@@ -1,4 +1,5 @@
 #include "mapping_capture.hpp"
+#include "voxel_map.hpp"
 
 #include <gtest/gtest.h>
 
@@ -74,23 +75,33 @@ pcl::PointCloud<pcl::PointXYZINormal>::Ptr makePlaneCloud(float seed) {
   return result;
 }
 
+SavedPose savedPose(const Keyframe &keyframe) {
+  SavedPose result;
+  result.stamp = keyframe.x0.t;
+  result.R = keyframe.x0.R;
+  result.t = keyframe.x0.p;
+  return result;
+}
+
 TEST(MappingCapture, AcceptedKeyframeCreatesPairedContinuousRecords) {
   Keyframe first = makeKeyframe(47, 100.5, Eigen::Vector3d(1.0, 2.0, 3.0));
   Keyframe second = makeKeyframe(3, 101.5, Eigen::Vector3d(4.0, 5.0, 6.0));
   SavedMap saved;
-  std::vector<const Keyframe *> sources;
   std::string error;
+  int first_capture_id = -1;
+  int second_capture_id = -1;
 
   ASSERT_TRUE(captureAcceptedKeyframe(
-      true, first, {descriptor(47)}, makePlaneCloud(10.0F), saved, sources,
-      error)) << error;
+      true, savedPose(first), first.plptr, {descriptor(47)},
+      makePlaneCloud(10.0F), saved, first_capture_id, error)) << error;
   ASSERT_TRUE(captureAcceptedKeyframe(
-      true, second, {descriptor(3)}, makePlaneCloud(20.0F), saved, sources,
-      error)) << error;
+      true, savedPose(second), second.plptr, {descriptor(3)},
+      makePlaneCloud(20.0F), saved, second_capture_id, error)) << error;
 
   ASSERT_EQ(saved.keyframes.size(), 2U);
   ASSERT_EQ(saved.btc_frames.size(), 2U);
-  ASSERT_EQ(sources.size(), 2U);
+  EXPECT_EQ(first_capture_id, 0);
+  EXPECT_EQ(second_capture_id, 1);
   EXPECT_EQ(saved.keyframes[0].id, 0);
   EXPECT_EQ(saved.keyframes[1].id, 1);
   EXPECT_EQ(saved.btc_frames[1].frame_id, 1);
@@ -98,8 +109,6 @@ TEST(MappingCapture, AcceptedKeyframeCreatesPairedContinuousRecords) {
   EXPECT_EQ(saved.btc_frames[1].descriptors[0].frame_number_, 1);
   EXPECT_DOUBLE_EQ(saved.keyframes[0].pose.stamp, 100.5);
   EXPECT_TRUE(saved.keyframes[1].pose.t.isApprox(Eigen::Vector3d(4.0, 5.0, 6.0)));
-  EXPECT_EQ(sources[0], &first);
-  EXPECT_EQ(sources[1], &second);
 }
 
 TEST(MappingCapture, DeepCopiesAllMutablePayloads) {
@@ -107,11 +116,12 @@ TEST(MappingCapture, DeepCopiesAllMutablePayloads) {
   std::vector<STD> descriptors{descriptor(9)};
   pcl::PointCloud<pcl::PointXYZINormal>::Ptr planes = makePlaneCloud(5.0F);
   SavedMap saved;
-  std::vector<const Keyframe *> sources;
   std::string error;
+  int capture_id = -1;
 
-  ASSERT_TRUE(captureAcceptedKeyframe(true, source, descriptors, planes, saved,
-                                      sources, error)) << error;
+  ASSERT_TRUE(captureAcceptedKeyframe(
+      true, savedPose(source), source.plptr, descriptors, planes, saved,
+      capture_id, error)) << error;
   source.plptr->points[0].x = 99.0F;
   descriptors[0].triangle_.x() = 99.0;
   descriptors[0].binary_A_.occupy_array_[0] = false;
@@ -129,77 +139,86 @@ TEST(MappingCapture, DeepCopiesAllMutablePayloads) {
 TEST(MappingCapture, RejectedMotionIsANoOp) {
   Keyframe source = makeKeyframe(1, 1.0, Eigen::Vector3d::Zero());
   SavedMap saved;
-  std::vector<const Keyframe *> sources;
   std::string error;
+  int capture_id = 99;
 
-  EXPECT_TRUE(captureAcceptedKeyframe(false, source, {}, nullptr, saved,
-                                      sources, error));
+  EXPECT_TRUE(captureAcceptedKeyframe(false, savedPose(source), source.plptr,
+                                      {}, nullptr, saved, capture_id, error));
   EXPECT_TRUE(error.empty());
+  EXPECT_EQ(capture_id, -1);
   EXPECT_TRUE(saved.keyframes.empty());
   EXPECT_TRUE(saved.btc_frames.empty());
-  EXPECT_TRUE(sources.empty());
 }
 
 TEST(MappingCapture, InvalidInputLeavesDestinationUnchanged) {
   Keyframe valid = makeKeyframe(1, 1.0, Eigen::Vector3d::Zero());
   SavedMap saved;
-  std::vector<const Keyframe *> sources;
   std::string error;
-  ASSERT_TRUE(captureAcceptedKeyframe(true, valid, {descriptor(1)},
-                                      makePlaneCloud(1.0F), saved, sources,
-                                      error)) << error;
+  int capture_id = -1;
+  ASSERT_TRUE(captureAcceptedKeyframe(
+      true, savedPose(valid), valid.plptr, {descriptor(1)},
+      makePlaneCloud(1.0F), saved, capture_id, error)) << error;
 
   const std::size_t keyframes_before = saved.keyframes.size();
   const std::size_t btc_before = saved.btc_frames.size();
-  const std::size_t sources_before = sources.size();
   Keyframe invalid = makeKeyframe(2, 2.0, Eigen::Vector3d::Zero());
   invalid.x0.p.x() = std::numeric_limits<double>::quiet_NaN();
 
-  EXPECT_FALSE(captureAcceptedKeyframe(true, invalid, {descriptor(2)},
-                                       makePlaneCloud(2.0F), saved, sources,
-                                       error));
+  EXPECT_FALSE(captureAcceptedKeyframe(
+      true, savedPose(invalid), invalid.plptr, {descriptor(2)},
+      makePlaneCloud(2.0F), saved, capture_id, error));
   EXPECT_FALSE(error.empty());
   EXPECT_EQ(saved.keyframes.size(), keyframes_before);
   EXPECT_EQ(saved.btc_frames.size(), btc_before);
-  EXPECT_EQ(sources.size(), sources_before);
 
-  EXPECT_FALSE(captureAcceptedKeyframe(true, valid, {descriptor(1)}, nullptr,
-                                       saved, sources, error));
+  EXPECT_FALSE(captureAcceptedKeyframe(
+      true, savedPose(valid), valid.plptr, {descriptor(1)}, nullptr, saved,
+      capture_id, error));
   EXPECT_EQ(saved.keyframes.size(), keyframes_before);
   EXPECT_EQ(saved.btc_frames.size(), btc_before);
-  EXPECT_EQ(sources.size(), sources_before);
 }
 
 TEST(MappingCapture, RefreshesFinalPosesAtomically) {
   Keyframe first = makeKeyframe(8, 10.0, Eigen::Vector3d::Zero());
   Keyframe second = makeKeyframe(2, 20.0, Eigen::Vector3d::Ones());
   SavedMap saved;
-  std::vector<const Keyframe *> sources;
   std::string error;
-  ASSERT_TRUE(captureAcceptedKeyframe(true, first, {descriptor(8)},
-                                      makePlaneCloud(1.0F), saved, sources,
-                                      error));
-  ASSERT_TRUE(captureAcceptedKeyframe(true, second, {descriptor(2)},
-                                      makePlaneCloud(2.0F), saved, sources,
-                                      error));
+  int first_id = -1;
+  int second_id = -1;
+  ASSERT_TRUE(captureAcceptedKeyframe(
+      true, savedPose(first), first.plptr, {descriptor(8)},
+      makePlaneCloud(1.0F), saved, first_id, error));
+  ASSERT_TRUE(captureAcceptedKeyframe(
+      true, savedPose(second), second.plptr, {descriptor(2)},
+      makePlaneCloud(2.0F), saved, second_id, error));
 
   first.x0.t = 30.0;
   first.x0.p = Eigen::Vector3d(3.0, 4.0, 5.0);
   second.x0.t = 40.0;
   second.x0.p = Eigen::Vector3d(6.0, 7.0, 8.0);
-  ASSERT_TRUE(refreshCapturedKeyframePoses(sources, saved, error)) << error;
+  CapturedPoseUpdate first_update;
+  first_update.capture_id = first_id;
+  first_update.pose = savedPose(first);
+  CapturedPoseUpdate second_update;
+  second_update.capture_id = second_id;
+  second_update.pose = savedPose(second);
+
+  ASSERT_TRUE(refreshCapturedKeyframePoses(
+      {second_update, first_update}, saved, error)) << error;
   EXPECT_DOUBLE_EQ(saved.keyframes[0].pose.stamp, 30.0);
   EXPECT_TRUE(saved.keyframes[1].pose.t.isApprox(Eigen::Vector3d(6.0, 7.0, 8.0)));
 
   const SavedPose first_before = saved.keyframes[0].pose;
   const SavedPose second_before = saved.keyframes[1].pose;
-  EXPECT_FALSE(refreshCapturedKeyframePoses({&first, &first}, saved, error));
+  second_update.capture_id = first_id;
+  EXPECT_FALSE(refreshCapturedKeyframePoses(
+      {first_update, second_update}, saved, error));
   EXPECT_DOUBLE_EQ(saved.keyframes[0].pose.stamp, first_before.stamp);
   EXPECT_TRUE(saved.keyframes[0].pose.t.isApprox(first_before.t));
   EXPECT_DOUBLE_EQ(saved.keyframes[1].pose.stamp, second_before.stamp);
   EXPECT_TRUE(saved.keyframes[1].pose.t.isApprox(second_before.t));
 
-  EXPECT_FALSE(refreshCapturedKeyframePoses({&first}, saved, error));
+  EXPECT_FALSE(refreshCapturedKeyframePoses({first_update}, saved, error));
   EXPECT_DOUBLE_EQ(saved.keyframes[1].pose.stamp, second_before.stamp);
 }
 

@@ -6,7 +6,6 @@
 #include <exception>
 #include <limits>
 #include <new>
-#include <unordered_set>
 #include <utility>
 
 namespace {
@@ -22,6 +21,11 @@ bool finiteVector(const Eigen::Vector3d &value) {
 
 bool finiteMatrix(const Eigen::Matrix3d &value) {
   return value.array().isFinite().all();
+}
+
+bool finitePose(const SavedPose &pose) {
+  return std::isfinite(pose.stamp) && finiteMatrix(pose.R) &&
+         finiteVector(pose.t);
 }
 
 bool finitePoint(const PointType &point) {
@@ -46,26 +50,9 @@ bool finiteDescriptor(const STD &descriptor) {
          finiteVector(descriptor.binary_C_.location_);
 }
 
-bool finiteState(const IMUST &state) {
-  return std::isfinite(state.t) && finiteMatrix(state.R) &&
-         finiteVector(state.p);
-}
-
-SavedPose poseFromState(const IMUST &state) {
-  SavedPose pose;
-  pose.stamp = state.t;
-  pose.R = state.R;
-  pose.t = state.p;
-  return pose;
-}
-
-bool validateExistingCapture(
-    const SavedMap &saved_map,
-    const std::vector<const Keyframe *> &final_pose_sources,
-    std::string &error) {
-  if (saved_map.keyframes.size() != saved_map.btc_frames.size() ||
-      saved_map.keyframes.size() != final_pose_sources.size()) {
-    return fail(error, "captured keyframe/BTC/source counts differ");
+bool validateExistingCapture(const SavedMap &saved_map, std::string &error) {
+  if (saved_map.keyframes.size() != saved_map.btc_frames.size()) {
+    return fail(error, "captured keyframe and BTC counts differ");
   }
   for (std::size_t i = 0; i < saved_map.keyframes.size(); ++i) {
     if (i > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
@@ -84,32 +71,33 @@ bool validateExistingCapture(
 }  // namespace
 
 bool captureAcceptedKeyframe(
-    bool accepted, const Keyframe &keyframe,
+    bool accepted, const SavedPose &pose,
+    const pcl::PointCloud<PointType>::Ptr &keyframe_cloud,
     const std::vector<STD> &descriptors,
     const pcl::PointCloud<pcl::PointXYZINormal>::Ptr &plane_cloud,
-    SavedMap &saved_map, std::vector<const Keyframe *> &final_pose_sources,
-    std::string &error) {
+    SavedMap &saved_map, int &capture_id, std::string &error) {
   error.clear();
+  capture_id = -1;
   if (!accepted) {
     return true;
   }
-  if (!validateExistingCapture(saved_map, final_pose_sources, error)) {
+  if (!validateExistingCapture(saved_map, error)) {
     return false;
   }
   if (saved_map.keyframes.size() >=
       static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     return fail(error, "too many captured keyframes");
   }
-  if (!keyframe.plptr) {
+  if (!keyframe_cloud) {
     return fail(error, "accepted keyframe cloud is null");
   }
   if (!plane_cloud) {
     return fail(error, "accepted BTC plane cloud is null");
   }
-  if (!finiteState(keyframe.x0)) {
+  if (!finitePose(pose)) {
     return fail(error, "accepted keyframe pose or timestamp is non-finite");
   }
-  for (const PointType &point : keyframe.plptr->points) {
+  for (const PointType &point : keyframe_cloud->points) {
     if (!finitePoint(point)) {
       return fail(error, "accepted keyframe cloud contains a non-finite point");
     }
@@ -124,48 +112,39 @@ bool captureAcceptedKeyframe(
       return fail(error, "accepted BTC descriptor contains a non-finite value");
     }
   }
-  for (const Keyframe *source : final_pose_sources) {
-    if (source == &keyframe) {
-      return fail(error, "accepted keyframe source was already captured");
-    }
-  }
 
   try {
-    const int capture_id = static_cast<int>(saved_map.keyframes.size());
+    const int new_id = static_cast<int>(saved_map.keyframes.size());
     SavedKeyframe saved_keyframe;
-    saved_keyframe.id = capture_id;
-    saved_keyframe.pose = poseFromState(keyframe.x0);
+    saved_keyframe.id = new_id;
+    saved_keyframe.pose = pose;
     saved_keyframe.cloud.reset(
-        new pcl::PointCloud<PointType>(*keyframe.plptr));
+        new pcl::PointCloud<PointType>(*keyframe_cloud));
 
     SavedBtcFrame saved_btc;
-    saved_btc.frame_id = capture_id;
-    saved_btc.anchor_keyframe_id = capture_id;
+    saved_btc.frame_id = new_id;
+    saved_btc.anchor_keyframe_id = new_id;
     saved_btc.descriptors = descriptors;
     for (STD &descriptor : saved_btc.descriptors) {
-      descriptor.frame_number_ = capture_id;
+      descriptor.frame_number_ = new_id;
     }
     saved_btc.plane_cloud.reset(
         new pcl::PointCloud<pcl::PointXYZINormal>(*plane_cloud));
-    saved_btc.plane_cloud->header.seq =
-        static_cast<std::uint32_t>(capture_id);
+    saved_btc.plane_cloud->header.seq = static_cast<std::uint32_t>(new_id);
 
     const std::size_t old_keyframes = saved_map.keyframes.size();
     const std::size_t old_btc = saved_map.btc_frames.size();
-    const std::size_t old_sources = final_pose_sources.size();
     try {
       saved_map.keyframes.reserve(old_keyframes + 1U);
       saved_map.btc_frames.reserve(old_btc + 1U);
-      final_pose_sources.reserve(old_sources + 1U);
       saved_map.keyframes.push_back(std::move(saved_keyframe));
       saved_map.btc_frames.push_back(std::move(saved_btc));
-      final_pose_sources.push_back(&keyframe);
     } catch (...) {
       saved_map.keyframes.resize(old_keyframes);
       saved_map.btc_frames.resize(old_btc);
-      final_pose_sources.resize(old_sources);
       throw;
     }
+    capture_id = new_id;
     return true;
   } catch (const std::bad_alloc &) {
     return fail(error, "out of memory while capturing accepted keyframe");
@@ -178,29 +157,38 @@ bool captureAcceptedKeyframe(
 }
 
 bool refreshCapturedKeyframePoses(
-    const std::vector<const Keyframe *> &final_pose_sources,
+    const std::vector<CapturedPoseUpdate> &pose_updates,
     SavedMap &saved_map, std::string &error) {
   error.clear();
-  if (!validateExistingCapture(saved_map, final_pose_sources, error)) {
+  if (!validateExistingCapture(saved_map, error)) {
     return false;
+  }
+  if (pose_updates.size() != saved_map.keyframes.size()) {
+    return fail(error, "final pose update count does not match captured map");
   }
 
   try {
-    std::unordered_set<const Keyframe *> unique_sources;
-    std::vector<SavedPose> refreshed;
-    unique_sources.reserve(final_pose_sources.size());
-    refreshed.reserve(final_pose_sources.size());
-    for (const Keyframe *source : final_pose_sources) {
-      if (source == nullptr) {
-        return fail(error, "final keyframe pose source is null");
+    std::vector<SavedPose> refreshed(saved_map.keyframes.size());
+    std::vector<bool> seen(saved_map.keyframes.size(), false);
+    for (const CapturedPoseUpdate &update : pose_updates) {
+      if (update.capture_id < 0 ||
+          static_cast<std::size_t>(update.capture_id) >= refreshed.size()) {
+        return fail(error, "final pose update has an out-of-range capture ID");
       }
-      if (!unique_sources.insert(source).second) {
-        return fail(error, "final keyframe pose source is duplicated");
+      const std::size_t index = static_cast<std::size_t>(update.capture_id);
+      if (seen[index]) {
+        return fail(error, "final pose update has a duplicate capture ID");
       }
-      if (!finiteState(source->x0)) {
+      if (!finitePose(update.pose)) {
         return fail(error, "final keyframe pose or timestamp is non-finite");
       }
-      refreshed.push_back(poseFromState(source->x0));
+      refreshed[index] = update.pose;
+      seen[index] = true;
+    }
+    for (bool present : seen) {
+      if (!present) {
+        return fail(error, "final pose update is missing a capture ID");
+      }
     }
 
     for (std::size_t i = 0; i < refreshed.size(); ++i) {
