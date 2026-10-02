@@ -614,7 +614,7 @@ bool restore_btc_database(const std::vector<SavedBtcFrame> &frames,
       return false;
     }
 
-    manager.current_frame_id_ = 0;
+    STDescManager restored(manager.config_setting_);
     for (std::size_t frame_index = 0; frame_index < ordered.size();
          ++frame_index) {
       const SavedBtcFrame &frame = *ordered[frame_index];
@@ -622,11 +622,18 @@ bool restore_btc_database(const std::vector<SavedBtcFrame> &frames,
       for (STD &descriptor : descriptors) {
         descriptor.frame_number_ = static_cast<int>(frame_index);
       }
-      frame.plane_cloud->header.seq =
+
+      pcl::PointCloud<pcl::PointXYZINormal>::Ptr plane_cloud(
+          new pcl::PointCloud<pcl::PointXYZINormal>(*frame.plane_cloud));
+      plane_cloud->header.seq =
           static_cast<std::uint32_t>(frame.anchor_keyframe_id);
-      manager.plane_cloud_vec_.push_back(frame.plane_cloud);
-      manager.AddSTDescs(descriptors);
+      restored.plane_cloud_vec_.push_back(plane_cloud);
+      restored.AddSTDescs(descriptors);
     }
+
+    manager.data_base_.swap(restored.data_base_);
+    manager.plane_cloud_vec_.swap(restored.plane_cloud_vec_);
+    std::swap(manager.current_frame_id_, restored.current_frame_id_);
     return true;
   } catch (const std::bad_alloc &) {
     return fail(error, "BTC restore failed: allocation limit exceeded");

@@ -4,10 +4,12 @@
 
 #include <boost/filesystem.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <initializer_list>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -159,6 +161,17 @@ void putDouble(std::string &bytes, std::size_t offset, double value) {
   }
 }
 
+void expectBytesAt(const std::string &bytes, std::size_t offset,
+                   std::initializer_list<std::uint8_t> expected) {
+  ASSERT_LE(offset + expected.size(), bytes.size());
+  std::size_t index = 0;
+  for (std::uint8_t value : expected) {
+    EXPECT_EQ(static_cast<unsigned char>(bytes[offset + index]), value)
+        << "byte offset " << offset + index;
+    ++index;
+  }
+}
+
 void expectLoadFailurePreservesCaller(const std::string &path,
                                       const std::string &error_fragment) {
   std::vector<SavedBtcFrame> output(1);
@@ -212,6 +225,18 @@ std::pair<int, double> search(STDescManager &manager,
   return result;
 }
 
+const STD *findStoredDescriptor(const STDescManager &manager,
+                                const Eigen::Vector3d &triangle) {
+  for (const auto &entry : manager.data_base_) {
+    for (const STD &descriptor : entry.second) {
+      if (descriptor.triangle_.isApprox(triangle, 0.0)) {
+        return &descriptor;
+      }
+    }
+  }
+  return nullptr;
+}
+
 }  // namespace
 
 TEST(BtcIo, RoundTripsStableFieldsAcrossTwoFrames) {
@@ -242,6 +267,36 @@ TEST(BtcIo, RoundTripsStableFieldsAcrossTwoFrames) {
                             input[frame].descriptors[descriptor]);
     }
   }
+}
+
+TEST(BtcIo, WritesGoldenLittleEndianIntegersAndLsbFirstPackedBits) {
+  TemporaryBtcPath temp;
+  std::vector<SavedBtcFrame> frames(1);
+  frames[0].frame_id = 0;
+  frames[0].anchor_keyframe_id = 0x12345678;
+  frames[0].descriptors.push_back(makeDescriptor(
+      5, -2, {true, false, true, false, false, false, false, true, true},
+      {false}, {}));
+
+  std::string error;
+  ASSERT_TRUE(save_btc_frames(temp.file(), frames, error)) << error;
+  const std::string bytes = readFile(temp.file());
+
+  ASSERT_EQ(bytes.size(), 194U);
+  EXPECT_EQ(bytes.substr(0, 8), "VXLBTC01");
+  // Every uint32/int32 field is checked as four literal golden bytes. The
+  // packed bytes are also literal, independent of the codec helpers.
+  expectBytesAt(bytes, 8, {0x01, 0x00, 0x00, 0x00});
+  expectBytesAt(bytes, 12, {0x01, 0x00, 0x00, 0x00});
+  expectBytesAt(bytes, 16, {0x00, 0x00, 0x00, 0x00});
+  expectBytesAt(bytes, 20, {0x78, 0x56, 0x34, 0x12});
+  expectBytesAt(bytes, 24, {0x01, 0x00, 0x00, 0x00});
+  expectBytesAt(bytes, 100, {0xfe, 0xff, 0xff, 0xff});
+  expectBytesAt(bytes, 129, {0x09, 0x00, 0x00, 0x00});
+  expectBytesAt(bytes, 133, {0x85, 0x01});
+  expectBytesAt(bytes, 160, {0x01, 0x00, 0x00, 0x00});
+  expectBytesAt(bytes, 164, {0x00});
+  expectBytesAt(bytes, 190, {0x00, 0x00, 0x00, 0x00});
 }
 
 TEST(BtcIo, RejectsEveryTruncatedPrefixAndPreservesCaller) {
@@ -353,27 +408,84 @@ TEST(BtcIo, RejectsInvalidSaveInputBeforeCreatingAFile) {
 
 TEST(BtcRestore, RestoresOrderedFramesPlanesAnchorsAndRewrittenIds) {
   std::vector<SavedBtcFrame> frames = makeFrames();
+  frames[0].anchor_keyframe_id = 101;
+  frames[1].anchor_keyframe_id = 202;
+  SavedBtcFrame frame_two;
+  frame_two.frame_id = 2;
+  frame_two.anchor_keyframe_id = 303;
+  frame_two.descriptors.push_back(makeDescriptor(
+      70, -55, {true, false, true}, {false, true}, {true}));
+  frame_two.plane_cloud = makePlaneCloud(3);
+  frames.push_back(frame_two);
+
+  const pcl::PointCloud<pcl::PointXYZINormal>::Ptr frame_zero_plane =
+      frames[0].plane_cloud;
+  const pcl::PointCloud<pcl::PointXYZINormal>::Ptr frame_one_plane =
+      frames[1].plane_cloud;
+  const pcl::PointCloud<pcl::PointXYZINormal>::Ptr frame_two_plane =
+      frames[2].plane_cloud;
+  frame_zero_plane->header.seq = 701U;
+  frame_one_plane->header.seq = 702U;
+  frame_two_plane->header.seq = 703U;
+  std::reverse(frames.begin(), frames.end());
+
   ConfigSetting config = makeSearchConfig();
   STDescManager manager(config);
   std::string error;
   ASSERT_TRUE(restore_btc_database(frames, manager, error)) << error;
 
-  EXPECT_EQ(manager.current_frame_id_, 2U);
-  ASSERT_EQ(manager.plane_cloud_vec_.size(), 2U);
-  EXPECT_EQ(manager.plane_cloud_vec_[0], frames[0].plane_cloud);
-  EXPECT_EQ(manager.plane_cloud_vec_[1], frames[1].plane_cloud);
-  EXPECT_EQ(manager.plane_cloud_vec_[0]->header.seq, 1U);
-  EXPECT_EQ(manager.plane_cloud_vec_[1]->header.seq, 0U);
+  EXPECT_EQ(manager.current_frame_id_, 3U);
+  ASSERT_EQ(manager.plane_cloud_vec_.size(), 3U);
+  EXPECT_NE(manager.plane_cloud_vec_[0], frame_zero_plane);
+  EXPECT_NE(manager.plane_cloud_vec_[1], frame_one_plane);
+  EXPECT_NE(manager.plane_cloud_vec_[2], frame_two_plane);
+  EXPECT_EQ(manager.plane_cloud_vec_[0]->size(), frame_zero_plane->size());
+  EXPECT_EQ(manager.plane_cloud_vec_[1]->size(), frame_one_plane->size());
+  EXPECT_EQ(manager.plane_cloud_vec_[2]->size(), frame_two_plane->size());
+  ASSERT_FALSE(manager.plane_cloud_vec_[0]->empty());
+  ASSERT_FALSE(manager.plane_cloud_vec_[1]->empty());
+  ASSERT_FALSE(manager.plane_cloud_vec_[2]->empty());
+  EXPECT_FLOAT_EQ(manager.plane_cloud_vec_[0]->front().x,
+                  frame_zero_plane->front().x);
+  EXPECT_FLOAT_EQ(manager.plane_cloud_vec_[1]->front().x,
+                  frame_one_plane->front().x);
+  EXPECT_FLOAT_EQ(manager.plane_cloud_vec_[2]->front().x,
+                  frame_two_plane->front().x);
+  EXPECT_EQ(manager.plane_cloud_vec_[0]->header.seq, 101U);
+  EXPECT_EQ(manager.plane_cloud_vec_[1]->header.seq, 202U);
+  EXPECT_EQ(manager.plane_cloud_vec_[2]->header.seq, 303U);
+
+  ASSERT_EQ(frames.size(), 3U);
+  EXPECT_EQ(frames[0].frame_id, 2);
+  EXPECT_EQ(frames[1].frame_id, 1);
+  EXPECT_EQ(frames[2].frame_id, 0);
+  EXPECT_EQ(frames[0].plane_cloud, frame_two_plane);
+  EXPECT_EQ(frames[1].plane_cloud, frame_one_plane);
+  EXPECT_EQ(frames[2].plane_cloud, frame_zero_plane);
+  EXPECT_EQ(frame_zero_plane->header.seq, 701U);
+  EXPECT_EQ(frame_one_plane->header.seq, 702U);
+  EXPECT_EQ(frame_two_plane->header.seq, 703U);
+  ASSERT_EQ(frames[0].descriptors.size(), 1U);
+  ASSERT_EQ(frames[1].descriptors.size(), 1U);
+  ASSERT_EQ(frames[2].descriptors.size(), 2U);
+  EXPECT_EQ(frames[0].descriptors[0].frame_number_, -55);
+  EXPECT_EQ(frames[1].descriptors[0].frame_number_, 1234);
+  EXPECT_EQ(frames[2].descriptors[0].frame_number_, 91);
+  EXPECT_EQ(frames[2].descriptors[1].frame_number_, -7);
 
   std::size_t descriptor_count = 0;
   for (const auto &entry : manager.data_base_) {
     descriptor_count += entry.second.size();
-    for (const STD &descriptor : entry.second) {
-      EXPECT_TRUE(descriptor.frame_number_ == 0 ||
-                  descriptor.frame_number_ == 1);
+  }
+  for (const SavedBtcFrame &frame : frames) {
+    for (const STD &input_descriptor : frame.descriptors) {
+      const STD *stored =
+          findStoredDescriptor(manager, input_descriptor.triangle_);
+      ASSERT_NE(stored, nullptr);
+      EXPECT_EQ(stored->frame_number_, frame.frame_id);
     }
   }
-  EXPECT_EQ(descriptor_count, 3U);
+  EXPECT_EQ(descriptor_count, 4U);
 }
 
 TEST(BtcRestore, RejectsNonContinuousFramesAndNonEmptyDestination) {
@@ -381,18 +493,42 @@ TEST(BtcRestore, RejectsNonContinuousFramesAndNonEmptyDestination) {
   std::string error;
 
   std::vector<SavedBtcFrame> bad_frames = makeFrames();
+  bad_frames[0].plane_cloud->header.seq = 77U;
+  bad_frames[1].plane_cloud->header.seq = 88U;
   bad_frames[1].frame_id = 4;
   STDescManager empty_manager(config);
+  empty_manager.current_frame_id_ = 17U;
   EXPECT_FALSE(restore_btc_database(bad_frames, empty_manager, error));
   EXPECT_NE(error.find("contiguous"), std::string::npos) << error;
+  EXPECT_EQ(empty_manager.current_frame_id_, 17U);
   EXPECT_TRUE(empty_manager.data_base_.empty());
   EXPECT_TRUE(empty_manager.plane_cloud_vec_.empty());
+  EXPECT_EQ(bad_frames[0].plane_cloud->header.seq, 77U);
+  EXPECT_EQ(bad_frames[1].plane_cloud->header.seq, 88U);
+  EXPECT_EQ(bad_frames[0].descriptors[0].frame_number_, 91);
+  EXPECT_EQ(bad_frames[1].descriptors[0].frame_number_, 1234);
 
   STDescManager non_empty_manager(config);
-  non_empty_manager.plane_cloud_vec_.push_back(makePlaneCloud(9));
+  const pcl::PointCloud<pcl::PointXYZINormal>::Ptr existing_plane =
+      makePlaneCloud(9);
+  existing_plane->header.seq = 909U;
+  non_empty_manager.plane_cloud_vec_.push_back(existing_plane);
+  const std::vector<STD> existing_descriptors(
+      1, makeDescriptor(90, 12, {true}, {false}, {}));
+  non_empty_manager.AddSTDescs(existing_descriptors);
+  const unsigned int existing_frame_id = non_empty_manager.current_frame_id_;
+  const std::size_t existing_bucket_count = non_empty_manager.data_base_.size();
   EXPECT_FALSE(restore_btc_database(makeFrames(), non_empty_manager, error));
   EXPECT_NE(error.find("non-empty"), std::string::npos) << error;
   EXPECT_EQ(non_empty_manager.plane_cloud_vec_.size(), 1U);
+  EXPECT_EQ(non_empty_manager.plane_cloud_vec_[0], existing_plane);
+  EXPECT_EQ(non_empty_manager.plane_cloud_vec_[0]->header.seq, 909U);
+  EXPECT_EQ(non_empty_manager.current_frame_id_, existing_frame_id);
+  EXPECT_EQ(non_empty_manager.data_base_.size(), existing_bucket_count);
+  const STD *stored = findStoredDescriptor(
+      non_empty_manager, existing_descriptors[0].triangle_);
+  ASSERT_NE(stored, nullptr);
+  EXPECT_EQ(stored->frame_number_, 12);
 }
 
 TEST(BtcRestore, PreservesSearchCandidateAndScore) {
