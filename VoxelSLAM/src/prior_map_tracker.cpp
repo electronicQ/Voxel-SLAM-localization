@@ -37,6 +37,9 @@ bool PriorMapTracker::initialize(const SavedMap &map, std::string &error) {
   if (map.keyframes.empty()) {
     return fail(error, "cannot index an empty saved map");
   }
+  if (generation_ == std::numeric_limits<std::uint64_t>::max()) {
+    return fail(error, "prior-map index generation is exhausted");
+  }
 
   try {
     std::shared_ptr<IndexState> candidate(new IndexState());
@@ -91,6 +94,7 @@ bool PriorMapTracker::initialize(const SavedMap &map, std::string &error) {
     candidate->xyz_index.setInputCloud(candidate->xyz_points);
 
     index_state_ = candidate;
+    ++generation_;
     reset_runtime_cache();
     return true;
   } catch (const std::bad_alloc &) {
@@ -187,3 +191,5 @@ void PriorMapTracker::reset_runtime_cache() {
 const SavedMap *PriorMapTracker::source_map() const {
   return index_state_ ? index_state_->source_map : nullptr;
 }
+
+std::uint64_t PriorMapTracker::generation() const { return generation_; }

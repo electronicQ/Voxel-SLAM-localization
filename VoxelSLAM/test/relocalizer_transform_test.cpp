@@ -118,6 +118,7 @@ TEST(BtcRelocalizer, ExpandsThenFallsBackGloballyWithExplicitMappings) {
   EXPECT_TRUE(result.t_HC.isApprox(expected_translation, 1e-12));
   EXPECT_TRUE(result.icp_observable);
   EXPECT_DOUBLE_EQ(result.icp_observability, 20.0);
+  EXPECT_TRUE(result.global_search_tried);
   EXPECT_TRUE(result.global_fallback_tried);
   ASSERT_EQ(result.attempted_radii.size(), 3U);
   EXPECT_DOUBLE_EQ(result.attempted_radii[0], 30.0);
@@ -188,7 +189,8 @@ TEST(BtcRelocalizer, RejectsDegenerateGeometryAfterBtcMatch) {
   const RelocalizationResult result =
       relocalizer.relocalize(options, search, degenerate);
   EXPECT_FALSE(result.success);
-  EXPECT_TRUE(result.global_fallback_tried);
+  EXPECT_TRUE(result.global_search_tried);
+  EXPECT_FALSE(result.global_fallback_tried);
   EXPECT_FALSE(result.icp_observable);
   EXPECT_NE(result.failure_reason.find("degenerate"), std::string::npos);
 }
@@ -210,9 +212,10 @@ TEST(BtcRelocalizer, RejectsInvalidAnchorMappingsAtomically) {
 
   int calls = 0;
   BtcSearchFunction search =
-      [&](const std::unordered_set<int> &, BtcSearchMatch &,
+      [&](const std::unordered_set<int> &allowed, BtcSearchMatch &,
           std::string &reason) {
         ++calls;
+        EXPECT_EQ(ordered(allowed), std::set<int>({2}));
         reason = "still using prior valid mapping";
         return false;
       };
@@ -221,6 +224,16 @@ TEST(BtcRelocalizer, RejectsInvalidAnchorMappingsAtomically) {
   options.fallback_to_global = false;
   EXPECT_FALSE(relocalizer.relocalize(options, search,
                                       IcpVerificationFunction()).success);
+  EXPECT_EQ(calls, 1);
+
+  SavedMap replacement = map;
+  replacement.keyframes[0].pose.t.x() = 500.0;
+  ASSERT_TRUE(tracker.initialize(replacement, error)) << error;
+  const RelocalizationResult stale = relocalizer.relocalize(
+      options, search, IcpVerificationFunction());
+  EXPECT_FALSE(stale.success);
+  EXPECT_NE(stale.failure_reason.find("changed"), std::string::npos)
+      << stale.failure_reason;
   EXPECT_EQ(calls, 1);
 }
 

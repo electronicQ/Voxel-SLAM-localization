@@ -8,6 +8,7 @@
 #include <pcl/point_types.h>
 
 #include <functional>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -45,6 +46,7 @@ struct RelocalizationResult {
   bool icp_observable = false;
   double icp_observability = 0.0;
   std::vector<double> attempted_radii;
+  bool global_search_tried = false;
   bool global_fallback_tried = false;
   std::string failure_reason;
 };
@@ -71,6 +73,7 @@ class BtcRelocalizer {
   struct State {
     const SavedMap *map = nullptr;
     const PriorMapTracker *tracker = nullptr;
+    std::uint64_t tracker_generation = 0;
     std::unordered_map<int, int> anchor_to_btc;
     std::unordered_map<int, int> btc_to_anchor;
     std::unordered_set<int> all_btc_frames;
@@ -83,4 +86,4 @@ class BtcRelocalizer {
 // while they remain alive. Every call uses the cross-session filtered overload.
 BtcSearchFunction make_stdesc_btc_search(
     STDescManager &manager, std::vector<STD> &current_descriptors,
-    const pcl::PointCloud<pcl::PointXYZINormal>::Ptr &current_planes);
+    pcl::PointCloud<pcl::PointXYZINormal>::Ptr current_planes);

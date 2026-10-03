@@ -129,6 +129,7 @@ bool BtcRelocalizer::initialize(const SavedMap &map,
     std::shared_ptr<State> candidate(new State());
     candidate->map = &map;
     candidate->tracker = &tracker;
+    candidate->tracker_generation = tracker.generation();
     std::unordered_set<int> keyframe_ids;
     keyframe_ids.reserve(map.keyframes.size());
     for (const SavedKeyframe &keyframe : map.keyframes) {
@@ -187,6 +188,12 @@ RelocalizationResult BtcRelocalizer::relocalize(
     result.failure_reason = "BTC relocalizer is not initialized";
     return result;
   }
+  if (state_->tracker->generation() != state_->tracker_generation ||
+      state_->tracker->source_map() != state_->map) {
+    result.failure_reason =
+        "prior-map tracker changed after BTC relocalizer initialization";
+    return result;
+  }
   if (!btc_search) {
     result.failure_reason = "BTC search callback is unavailable";
     return result;
@@ -194,7 +201,7 @@ RelocalizationResult BtcRelocalizer::relocalize(
 
   try {
     if (!options.use_prior_position) {
-      result.global_fallback_tried = true;
+      result.global_search_tried = true;
       tryCandidateSet(state_->all_btc_frames, state_->btc_to_anchor, btc_search,
                       icp_verify, result);
       return result;
@@ -230,6 +237,7 @@ RelocalizationResult BtcRelocalizer::relocalize(
     }
 
     if (options.fallback_to_global) {
+      result.global_search_tried = true;
       result.global_fallback_tried = true;
       tryCandidateSet(state_->all_btc_frames, state_->btc_to_anchor, btc_search,
                       icp_verify, result);
@@ -253,8 +261,8 @@ RelocalizationResult BtcRelocalizer::relocalize(
 
 BtcSearchFunction make_stdesc_btc_search(
     STDescManager &manager, std::vector<STD> &current_descriptors,
-    const pcl::PointCloud<pcl::PointXYZINormal>::Ptr &current_planes) {
-  return [&manager, &current_descriptors, &current_planes](
+    pcl::PointCloud<pcl::PointXYZINormal>::Ptr current_planes) {
+  return [&manager, &current_descriptors, current_planes](
              const std::unordered_set<int> &allowed, BtcSearchMatch &match,
              std::string &failure_reason) {
     if (!current_planes) {

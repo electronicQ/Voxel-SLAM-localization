@@ -7,6 +7,7 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -24,6 +25,7 @@ class PriorMapTracker {
 
   void reset_runtime_cache();
   const SavedMap *source_map() const;
+  std::uint64_t generation() const;
 
  private:
   struct IndexState {
@@ -41,4 +43,5 @@ class PriorMapTracker {
 
   std::shared_ptr<IndexState> index_state_;
   std::unordered_set<int> loaded_keyframe_ids_;
+  std::uint64_t generation_ = 0;
 };
