@@ -52,6 +52,7 @@ add_library(voxel_slam_map_io
   src/mapping_capture.cpp
   src/prior_map_tracker.cpp
   src/relocalizer.cpp
+  src/session_aligner.cpp
 )
 target_include_directories(voxel_slam_map_io PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -60,6 +61,7 @@ target_link_libraries(voxel_slam_map_io
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
   ${Boost_LIBRARIES}
+  gtsam
 )
 
 add_executable(voxelslam src/voxelslam.cpp)
