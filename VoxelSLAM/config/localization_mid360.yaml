@@ -1,0 +1,94 @@
+General:
+  mode: localization
+  # map_export_path is mapping-only and must stay empty here.
+  map_export_path: ""
+  lid_topic: "/livox/lidar"
+  imu_topic: "/livox/imu"
+  save_path: "/home/zale/save_datas/"
+  previous_map: ""
+  bagname: "mid360_localization"
+  lidar_type: 0
+  blind: 0.5
+  point_filter_num: 3
+  extrinsic_tran: [-0.011, -0.02329, 0.04412]
+  extrinsic_rota: [1, 0, 0,
+                   0, 1, 0,
+                   0, 0, 1]
+  is_save_map: 0
+
+Localization:
+  # A package previously exported by General/map_export_path in mapping mode.
+  map_path: ""
+
+  # Historical keyframe cache. unload must be >= load to provide hysteresis.
+  local_map_load_radius: 30.0
+  local_map_unload_radius: 40.0
+  local_map_max_load_per_scan: 1
+  local_map_preload_limit: 20
+
+  # true: BTC candidates are restricted by the prior x/y and expanding radii.
+  # false: BTC searches globally; btc_prior_pose and all radius/fallback fields
+  # below are ignored. Yaw is intentionally not used for candidate selection.
+  use_prior_pose_for_btc: true
+  btc_prior_pose:
+    x: 0.0
+    y: 0.0
+  btc_search_radius: 30.0
+  btc_expand_on_failure: true
+  btc_max_search_radius: 100.0
+  btc_fallback_to_global: true
+
+  # RViz "2D Pose Estimate" always remains available. Its x/y/yaw are used;
+  # roll/pitch come from the live IMU and z from the nearest XY map keyframe.
+  rviz_initialpose_enabled: true
+  direct_pose_validation_scans: 3
+  direct_pose_validation_timeout_sec: 5.0
+
+  # Local-map tracking validation and LOST recovery.
+  tracking_min_matched_points: 50
+  tracking_max_mean_abs_point_plane: 0.5
+  tracking_min_normal_eigenvalue: 14.0
+  lost_bad_scan_limit: 5
+
+  # Reject implausibly large session-to-map corrections.
+  alignment_max_translation_m: 1000.0
+  alignment_max_rotation_deg: 180.0
+
+Odometry:
+  max_init: 30
+  cov_gyr: 0.1
+  cov_acc: 1
+  rdw_gyr: 0.0001
+  rdw_acc: 0.0001
+  down_size: 0.1
+  dept_err: 0.02
+  beam_err: 0.05
+  voxel_size: 1
+  min_eigen_value: 0.0025
+  degrade_bound: 10
+  point_notime: 0
+
+LocalBA:
+  win_size: 10
+  max_layer: 2
+  cov_gyr: 0.01
+  cov_acc: 2
+  rdw_gyr: 0.0001
+  rdw_acc: 0.0001
+  min_ba_point: 1
+  plane_eigen_value_thre: [4.0, 4.0, 4.0, 4.0]
+  imu_coef: 0.0002
+  thread_num: 5
+
+Loop:
+  # These values, together with the remaining BTC defaults in read_parameters,
+  # must match those used when the map package was exported.
+  jud_default: 0.45
+  icp_eigval: 9
+  ratio_drift: 0.01
+
+GBA:
+  voxel_size: 2
+  min_eigen_value: 0.01
+  eigen_value_array: [4.0, 4.0, 4.0, 4.0]
+  total_max_iter: 6

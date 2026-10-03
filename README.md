@@ -156,7 +156,75 @@ roslaunch voxel_slam vxlm_mid360.launch
 rosbag play jungle_challenge.bag --pause
 ```
 
-### 4.5 Others
+### 4.5 Build a reusable map and localize in it
+
+Mapping and localization use the same `voxelslam` executable. To export a map
+package, keep `General/mode: mapping` and set `General/map_export_path` in
+`VoxelSLAM/config/mid360.yaml`. The destination must not exist yet, while its
+parent directory must already exist. Run mapping normally, then request final
+global optimization and export:
+
+```bash
+roslaunch voxel_slam vxlm_mid360.launch
+rosbag play mapping.bag --pause
+rosparam set finish true
+```
+
+The package contains optimized keyframe poses, local-frame keyframe clouds,
+BTC descriptors and BTC plane clouds. It is written transactionally only after
+the final optimization completes.
+
+For localization, set `Localization/map_path` in
+`VoxelSLAM/config/localization_mid360.yaml`, or pass it to the launch file:
+
+```bash
+roslaunch voxel_slam vxlm_localization_mid360.launch \
+  map_path:=/absolute/path/to/map_package
+rosbag play localization.bag --pause
+```
+
+`use_prior_pose_for_btc: true` restricts BTC history candidates to keyframes
+within `btc_search_radius` of `btc_prior_pose.x/y`. Failures expand the radius
+up to `btc_max_search_radius`, then optionally search globally. Candidate
+selection deliberately has no yaw constraint. If `use_prior_pose_for_btc` is
+false, the prior pose and all radius/expansion/fallback settings are ignored
+and BTC starts with a global search.
+
+RViz **2D Pose Estimate** is always an independent initialization path when
+`rviz_initialpose_enabled` is true. Its x/y/yaw are treated as the current
+vehicle pose in `map`; roll/pitch come from the live IMU and z comes from the
+nearest historical keyframe in XY. It bypasses BTC, but localization becomes
+valid only after `direct_pose_validation_scans` consecutive local historical
+map matches. A newer RViz request replaces an older request.
+
+The latched status topics are:
+
+- `/localization/state` (`std_msgs/String`): `WAITING_FOR_MAP`,
+  `LOCAL_ODOMETRY`, `RELOCALIZING`, `ALIGNING`, `IN_MAP_TRACKING`, or `LOST`.
+- `/localization/valid` (`std_msgs/Bool`): true only after BTC alignment or RViz
+  local-map validation has succeeded.
+
+After the configured number of bad tracking scans, or immediately after a
+non-finite solve, the system enters `LOST`, clears only current-session state,
+and automatically returns to local odometry plus BTC recovery. The loaded map,
+historical BTC database, and keyframe indexes remain immutable.
+
+To evaluate a TUM-format estimate against a map-frame TUM reference and verify
+that the map package did not change:
+
+```bash
+python3 VoxelSLAM/scripts/evaluate_localization.py \
+  --estimate estimate.tum \
+  --reference reference.tum \
+  --map-dir /absolute/path/to/map_package
+```
+
+The evaluator reports map-frame ATE RMSE without post-hoc alignment,
+translational/rotational RPE, per-file SHA-256 values, and a deterministic
+whole-tree SHA-256. Re-run it before and after localization; all map hashes must
+remain identical.
+
+### 4.6 Others
 
 Other types of LiDAR will be released later.
 

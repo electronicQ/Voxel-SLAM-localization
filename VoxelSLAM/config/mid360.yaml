@@ -1,5 +1,7 @@
 General:
   mode: mapping
+  # Set to an empty/nonexistent directory to export an immutable localization
+  # map package after final global optimization. Leave empty to disable export.
   map_export_path: ""
   lid_topic: "/livox/lidar"
   imu_topic: "/livox/imu"
