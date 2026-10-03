@@ -1,11 +1,40 @@
 #include "voxelslam.hpp"
+#include "global_correction.hpp"
 #include "mapping_capture.hpp"
 
+#include <cstdint>
+#include <limits>
 #include <new>
 #include <stdexcept>
 #include <unordered_set>
 
 using namespace std;
+
+namespace {
+
+CorrectionState toCorrectionState(const IMUST &state) {
+  CorrectionState result;
+  result.R = state.R;
+  result.p = state.p;
+  result.v = state.v;
+  result.bg = state.bg;
+  result.ba = state.ba;
+  result.g = state.g;
+  result.cov = state.cov;
+  return result;
+}
+
+void updateFromCorrectionState(const CorrectionState &source, IMUST &target) {
+  target.R = source.R;
+  target.p = source.p;
+  target.v = source.v;
+  target.bg = source.bg;
+  target.ba = source.ba;
+  target.g = source.g;
+  target.cov = source.cov;
+}
+
+}  // namespace
 
 class ResultOutput
 {
@@ -747,6 +776,8 @@ public:
   int history_kfsize = 0;
   vector<OctoTree*> octos_release;
   int reset_flag = 0;
+  bool has_global_correction_generation = false;
+  std::uint64_t global_correction_generation = 0;
   int g_update = 0;
   int thread_num = 5;
   int degrade_bound = 10;
@@ -1123,6 +1154,66 @@ public:
   {
     printf("loop update: %zu\n", sws[0].size());
     double t1 = ros::Time::now().toSec();
+
+    {
+      lock_guard<mutex> state_lock(mtx_loop);
+      if (global_correction_generation ==
+          numeric_limits<std::uint64_t>::max()) {
+        ROS_ERROR("global correction generation is exhausted");
+        loop_detect = 0;
+        return;
+      }
+      if (win_count <= 0 ||
+          static_cast<size_t>(win_count) > x_buf.size()) {
+        ROS_ERROR("global correction found an invalid frontend window");
+        loop_detect = 0;
+        return;
+      }
+
+      CorrectionTargets targets;
+      targets.current_state = toCorrectionState(x_curr);
+      targets.rotate_gravity = (g_update == 1);
+      targets.has_applied_generation = has_global_correction_generation;
+      targets.last_applied_generation = global_correction_generation;
+      targets.window_states.reserve(win_count);
+      for (int i = 0; i < win_count; ++i) {
+        targets.window_states.push_back(toCorrectionState(x_buf[i]));
+      }
+      targets.cached_states.reserve(buf_lba2loop.size());
+      for (ScanPose *pose : buf_lba2loop) {
+        if (pose == nullptr) {
+          ROS_ERROR("global correction found a null cached pose");
+          loop_detect = 0;
+          return;
+        }
+        targets.cached_states.push_back(toCorrectionState(pose->x));
+      }
+
+      string correction_error;
+      const std::uint64_t next_generation =
+          global_correction_generation + 1;
+      if (!apply_global_correction_once(dx, next_generation, targets,
+                                        correction_error)) {
+        ROS_ERROR("global correction rejected: %s",
+                  correction_error.c_str());
+        loop_detect = 0;
+        return;
+      }
+
+      updateFromCorrectionState(targets.current_state, x_curr);
+      for (int i = 0; i < win_count; ++i) {
+        updateFromCorrectionState(targets.window_states[i], x_buf[i]);
+      }
+      size_t cached_index = 0;
+      for (ScanPose *pose : buf_lba2loop) {
+        updateFromCorrectionState(targets.cached_states[cached_index],
+                                  pose->x);
+        ++cached_index;
+      }
+      has_global_correction_generation = true;
+      global_correction_generation = targets.last_applied_generation;
+    }
+
     for(auto iter=surf_map.begin(); iter!=surf_map.end(); iter++)
     {
       // octos_release.push_back(iter->second);
@@ -1149,7 +1240,6 @@ public:
 
     for(ScanPose *bl: buf_lba2loop)
     {
-      bl->update(dx);
       ap.x = bl->x.p[0];
       ap.y = bl->x.p[1];
       ap.z = bl->x.p[2];
@@ -1159,11 +1249,6 @@ public:
     for(int i=0; i<win_count; i++)
     {
       IMUST &x = x_buf[i];
-      x.v = dx.R * x.v;
-      x.p = dx.R * x.p + dx.p;
-      x.R = dx.R * x.R;
-      if(g_update == 1)
-        x.g = dx.R * x.g;
       // PointType ap;
       ap.x = x.p[0]; ap.y = x.p[1]; ap.z = x.p[2];
       pcl_path.push_back(ap);
@@ -1173,7 +1258,6 @@ public:
 
     x_curr.R = x_buf[win_count-1].R;
     x_curr.p = x_buf[win_count-1].p;
-    x_curr.v = dx.R * x_curr.v;
     x_curr.g = x_buf[win_count-1].g;
     
     for(int i=0; i<win_size; i++)
