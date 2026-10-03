@@ -1,13 +1,19 @@
 #include "voxelslam.hpp"
 #include "global_correction.hpp"
+#include "btc_io.hpp"
 #include "localization_state.hpp"
 #include "mapping_capture.hpp"
 #include "prior_map_tracker.hpp"
+#include "relocalizer.hpp"
+#include "session_aligner.hpp"
 
 #include <geometry_msgs/PoseWithCovarianceStamped.h>
+#include <std_msgs/Bool.h>
+#include <std_msgs/String.h>
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <new>
 #include <stdexcept>
@@ -780,7 +786,7 @@ public:
   pcl::KdTreeFLANN<PointType> kd_keyframes;
   int history_kfsize = 0;
   vector<OctoTree*> octos_release;
-  int reset_flag = 0;
+  std::atomic<int> reset_flag{0};
   bool has_global_correction_generation = false;
   std::uint64_t global_correction_generation = 0;
   int g_update = 0;
@@ -801,8 +807,18 @@ public:
   string operation_mode, map_export_path, localization_map_path;
   SavedMap localization_map;
   PriorMapTracker prior_map_tracker;
+  mutex historical_map_mutex;
   std::atomic<bool> prior_map_ready{false};
   std::atomic<bool> localization_valid{false};
+  mutex frontend_pipeline_mutex;
+  mutex localization_state_mutex;
+  LocalizationStateMachine localization_machine;
+  ros::Publisher pub_localization_state;
+  ros::Publisher pub_localization_valid;
+  int lost_bad_scan_limit = 5;
+  int tracking_min_matched_points = 50;
+  double tracking_max_mean_abs_point_plane = 0.5;
+  double tracking_min_normal_eigenvalue = 14.0;
   double local_map_load_radius = 30.0;
   double local_map_unload_radius = 40.0;
   int local_map_max_load_per_scan = 1;
@@ -819,11 +835,22 @@ public:
   int direct_pose_validation_scans = 3;
   double direct_pose_validation_timeout_sec = 5.0;
   double direct_validation_started_sec = 0.0;
+  bool use_prior_pose_for_btc = true;
+  Eigen::Vector2d btc_prior_xy = Eigen::Vector2d::Zero();
+  double btc_search_radius = 30.0;
+  bool btc_expand_on_failure = true;
+  double btc_max_search_radius = 100.0;
+  bool btc_fallback_to_global = true;
+  double alignment_max_translation_m = 1000000.0;
+  double alignment_max_rotation_deg = 180.0;
+  std::atomic<bool> frontend_reset_requested{false};
+  bool lost_recovery_pending = false;
   int is_save_map;
 
   VOXEL_SLAM(ros::NodeHandle &n)
   {
     double cov_gyr, cov_acc, rand_walk_gyr, rand_walk_acc;
+    double btc_prior_x = 0.0, btc_prior_y = 0.0;
     vector<double> vecR(9), vecT(3);
     scanPoses = new vector<ScanPose*>();
     keyframes = new vector<Keyframe*>();
@@ -850,6 +877,33 @@ public:
                  direct_pose_validation_scans, 3);
     n.param<double>("Localization/direct_pose_validation_timeout_sec",
                     direct_pose_validation_timeout_sec, 5.0);
+    n.param<int>("Localization/lost_bad_scan_limit",
+                 lost_bad_scan_limit, 5);
+    n.param<int>("Localization/tracking_min_matched_points",
+                 tracking_min_matched_points, 50);
+    n.param<double>("Localization/tracking_max_mean_abs_point_plane",
+                    tracking_max_mean_abs_point_plane, 0.5);
+    n.param<double>("Localization/tracking_min_normal_eigenvalue",
+                    tracking_min_normal_eigenvalue, 14.0);
+    n.param<bool>("Localization/use_prior_pose_for_btc",
+                  use_prior_pose_for_btc, true);
+    n.param<double>("Localization/btc_prior_pose/x",
+                    btc_prior_x, 0.0);
+    n.param<double>("Localization/btc_prior_pose/y",
+                    btc_prior_y, 0.0);
+    btc_prior_xy << btc_prior_x, btc_prior_y;
+    n.param<double>("Localization/btc_search_radius",
+                    btc_search_radius, 30.0);
+    n.param<bool>("Localization/btc_expand_on_failure",
+                  btc_expand_on_failure, true);
+    n.param<double>("Localization/btc_max_search_radius",
+                    btc_max_search_radius, 100.0);
+    n.param<bool>("Localization/btc_fallback_to_global",
+                  btc_fallback_to_global, true);
+    n.param<double>("Localization/alignment_max_translation_m",
+                    alignment_max_translation_m, 1000000.0);
+    n.param<double>("Localization/alignment_max_rotation_deg",
+                    alignment_max_rotation_deg, 180.0);
     n.param<int>("General/lidar_type", feat.lidar_type, 0);
     n.param<double>("General/blind", feat.blind, 0.1);
     n.param<int>("General/point_filter_num", feat.point_filter_num, 3);
@@ -874,7 +928,22 @@ public:
         local_map_unload_radius < local_map_load_radius ||
         local_map_max_load_per_scan < 0 || local_map_preload_limit <= 0 ||
         direct_pose_validation_scans <= 0 ||
-        direct_pose_validation_timeout_sec <= 0.0))
+        direct_pose_validation_timeout_sec <= 0.0 ||
+        lost_bad_scan_limit <= 0 || btc_search_radius <= 0.0 ||
+        tracking_min_matched_points <= 0 ||
+        tracking_max_mean_abs_point_plane <= 0.0 ||
+        tracking_min_normal_eigenvalue <= 0.0 ||
+        btc_max_search_radius < btc_search_radius ||
+        alignment_max_translation_m <= 0.0 ||
+        alignment_max_rotation_deg <= 0.0 ||
+        alignment_max_rotation_deg > 180.0 ||
+        !btc_prior_xy.array().isFinite().all() ||
+        !std::isfinite(btc_search_radius) ||
+        !std::isfinite(btc_max_search_radius) ||
+        !std::isfinite(tracking_max_mean_abs_point_plane) ||
+        !std::isfinite(tracking_min_normal_eigenvalue) ||
+        !std::isfinite(alignment_max_translation_m) ||
+        !std::isfinite(alignment_max_rotation_deg)))
     {
       ROS_FATAL("Localization map-cache or direct-validation settings are invalid.");
       throw std::invalid_argument("invalid localization settings");
@@ -888,6 +957,15 @@ public:
     if(operation_mode == "localization" && rviz_initialpose_enabled)
       sub_initialpose = n.subscribe(
           "/initialpose", 5, &VOXEL_SLAM::initialpose_callback, this);
+    if(operation_mode == "localization")
+    {
+      localization_machine = LocalizationStateMachine(lost_bad_scan_limit);
+      pub_localization_state = n.advertise<std_msgs::String>(
+          "/localization/state", 1, true);
+      pub_localization_valid = n.advertise<std_msgs::Bool>(
+          "/localization/valid", 1, true);
+      publish_localization_status();
+    }
     odom_ekf.imu_topic = imu_topic;
 
     n.param<double>("Odometry/cov_gyr", cov_gyr, 0.1);
@@ -988,6 +1066,54 @@ public:
     ROS_INFO_STREAM("Captured RViz initial pose generation " << generation);
   }
 
+  void publish_localization_status()
+  {
+    if(operation_mode != "localization") return;
+    std_msgs::String state_message;
+    std_msgs::Bool valid_message;
+    state_message.data = localization_state_name(localization_machine.state());
+    valid_message.data = localization_machine.localization_valid();
+    pub_localization_state.publish(state_message);
+    pub_localization_valid.publish(valid_message);
+  }
+
+  LocalizationTransition handle_localization_event(LocalizationEvent event)
+  {
+    lock_guard<mutex> lock(localization_state_mutex);
+    string warning;
+    LocalizationTransition transition =
+        localization_machine.handle(event, warning);
+    if(!transition.accepted)
+      ROS_WARN_STREAM("Ignored " << warning << " in state "
+                      << localization_state_name(localization_machine.state()));
+    localization_valid.store(localization_machine.localization_valid());
+    publish_localization_status();
+    return transition;
+  }
+
+  LocalizationState localization_state_snapshot()
+  {
+    lock_guard<mutex> lock(localization_state_mutex);
+    return localization_machine.state();
+  }
+
+  AlignmentSource alignment_source_snapshot()
+  {
+    lock_guard<mutex> lock(localization_state_mutex);
+    return localization_machine.alignment_source();
+  }
+
+  bool run_if_active_alignment(AlignmentSource source,
+                               const std::function<void()> &action)
+  {
+    lock_guard<mutex> lock(localization_state_mutex);
+    if(localization_machine.state() != LocalizationState::ALIGNING ||
+       localization_machine.alignment_source() != source || !action)
+      return false;
+    action();
+    return true;
+  }
+
   void release_voxel_map(unordered_map<VOXEL_LOC, OctoTree*> &map)
   {
     vector<OctoTree*> descendants;
@@ -1067,6 +1193,7 @@ public:
   bool rebuild_historical_local_map(const Eigen::Vector3d &center,
                                     string &error)
   {
+    lock_guard<mutex> lock(historical_map_mutex);
     PriorMapCacheUpdate update;
     if(!prior_map_tracker.rebuild_local_map(
            center, local_map_load_radius, local_map_preload_limit,
@@ -1077,6 +1204,7 @@ public:
 
   bool update_historical_local_map(string &error)
   {
+    lock_guard<mutex> lock(historical_map_mutex);
     PriorMapCacheUpdate update;
     if(!prior_map_tracker.update_loaded_keyframes(
            x_curr.p, local_map_load_radius, local_map_unload_radius,
@@ -1085,6 +1213,12 @@ public:
     if(update.loaded_ids.empty() && update.unloaded_ids.empty())
       return true;
     return install_historical_cache(update, error);
+  }
+
+  void reset_historical_runtime_cache()
+  {
+    lock_guard<mutex> lock(historical_map_mutex);
+    prior_map_tracker.reset_runtime_cache();
   }
 
   bool apply_frontend_global_correction(const IMUST &correction,
@@ -1156,11 +1290,22 @@ public:
        request.generation == active_direct_generation)
       return 0;
 
+    if(!initial_pose_requests.is_current(request.generation))
+      return 0;
+    if(!handle_localization_event(
+           LocalizationEvent::DIRECT_POSE_STARTED).accepted)
+    {
+      error = "localization state rejected the RViz initial pose";
+      handled_direct_generation = request.generation;
+      return -1;
+    }
+
     DirectPoseSeed seed;
     if(!make_direct_pose_seed(request, true, x_curr.R, x_curr.p,
                               prior_map_tracker, seed, error))
     {
       handled_direct_generation = request.generation;
+      handle_localization_event(LocalizationEvent::DIRECT_POSE_FAILED);
       return -1;
     }
     if(!initial_pose_requests.is_current(request.generation))
@@ -1169,6 +1314,7 @@ public:
     if(!rebuild_historical_local_map(seed.T_W_C.t, error))
     {
       handled_direct_generation = request.generation;
+      handle_localization_event(LocalizationEvent::DIRECT_POSE_FAILED);
       return -1;
     }
     if(!initial_pose_requests.is_current(request.generation))
@@ -1188,11 +1334,11 @@ public:
     if(!correction_succeeded)
     {
       handled_direct_generation = request.generation;
-      prior_map_tracker.reset_runtime_cache();
+      reset_historical_runtime_cache();
+      handle_localization_event(LocalizationEvent::DIRECT_POSE_FAILED);
       return -1;
     }
 
-    localization_valid.store(false);
     direct_validation_active = true;
     active_direct_generation = request.generation;
     handled_direct_generation = request.generation;
@@ -1205,7 +1351,8 @@ public:
   }
 
   // The point-to-plane alignment for odometry
-  bool lio_state_estimation(PVecPtr pptr, TrackingQuality *quality = nullptr)
+  bool lio_state_estimation(PVecPtr pptr, TrackingQuality *quality = nullptr,
+                            double minimum_normal_eigenvalue = 14.0)
   {
     TrackingQuality candidate_quality;
     IMUST x_prop = x_curr;
@@ -1321,7 +1468,7 @@ public:
             : std::numeric_limits<double>::infinity();
     candidate_quality.min_normal_eigenvalue = evalue[0];
     candidate_quality.finite =
-        x_curr.R.array().isFinite().all() &&
+        solve_succeeded && x_curr.R.array().isFinite().all() &&
         x_curr.p.array().isFinite().all() &&
         x_curr.v.array().isFinite().all() &&
         x_curr.cov.array().isFinite().all() &&
@@ -1334,7 +1481,8 @@ public:
 
     return candidate_quality.solve_succeeded &&
            candidate_quality.finite &&
-           candidate_quality.min_normal_eigenvalue >= 14.0;
+           candidate_quality.min_normal_eigenvalue >=
+               minimum_normal_eigenvalue;
   }
 
   // The point-to-plane alignment for initialization
@@ -1922,6 +2070,24 @@ public:
         continue;
       }
 
+      if(frontend_reset_requested.exchange(false))
+      {
+        system_reset(imus);
+        motion_init_flag = 1;
+        reset_flag = 1;
+        continue;
+      }
+
+      unique_lock<mutex> localization_pipeline_lock;
+      if(operation_mode == "localization")
+        localization_pipeline_lock =
+            unique_lock<mutex>(frontend_pipeline_mutex);
+      if(lost_recovery_pending)
+      {
+        handle_localization_event(LocalizationEvent::RECOVERY_STARTED);
+        lost_recovery_pending = false;
+      }
+
       static int first_flag = 1;
       if (first_flag)
       {
@@ -1962,12 +2128,12 @@ public:
         {
           ROS_WARN_STREAM("Direct-pose initialization failed: "
                           << direct_pose_error);
-          localization_valid.store(false);
           direct_validation_active = false;
           active_direct_generation = 0;
-          prior_map_tracker.reset_runtime_cache();
+          reset_historical_runtime_cache();
           system_reset(imus);
           motion_init_flag = 1;
+          reset_flag = 1;
           continue;
         }
 
@@ -1992,7 +2158,16 @@ public:
           bool tracking_good = false;
           if(update_historical_local_map(cache_error))
           {
-            tracking_good = lio_state_estimation(pptr, &scan_quality);
+            const bool solver_good =
+                lio_state_estimation(pptr, &scan_quality,
+                                     tracking_min_normal_eigenvalue);
+            tracking_good =
+                solver_good &&
+                scan_quality.matched_points >= tracking_min_matched_points &&
+                scan_quality.mean_abs_point_plane <=
+                    tracking_max_mean_abs_point_plane &&
+                scan_quality.min_normal_eigenvalue >=
+                    tracking_min_normal_eigenvalue;
           }
           else
           {
@@ -2018,8 +2193,9 @@ public:
 
             if(direct_validation_streak >= direct_pose_validation_scans)
             {
-              localization_valid.store(true);
               direct_validation_active = false;
+              handle_localization_event(
+                  LocalizationEvent::DIRECT_POSE_VALIDATED);
               ROS_INFO_STREAM(
                   "RViz direct pose validated after "
                   << direct_validation_streak << " consecutive scans.");
@@ -2029,12 +2205,37 @@ public:
                     direct_pose_validation_timeout_sec)
             {
               ROS_WARN("RViz direct-pose validation timed out; resetting temporary LIO.");
-              localization_valid.store(false);
               direct_validation_active = false;
               active_direct_generation = 0;
-              prior_map_tracker.reset_runtime_cache();
+              handle_localization_event(
+                  LocalizationEvent::DIRECT_POSE_FAILED);
+              reset_historical_runtime_cache();
               system_reset(imus);
               motion_init_flag = 1;
+              reset_flag = 1;
+              continue;
+            }
+          }
+
+          if(!direct_validation_active && localization_valid.load())
+          {
+            LocalizationEvent tracking_event =
+                !scan_quality.finite
+                    ? LocalizationEvent::TRACKING_NONFINITE
+                    : (tracking_good ? LocalizationEvent::TRACKING_GOOD
+                                     : LocalizationEvent::TRACKING_BAD);
+            const LocalizationTransition tracking_transition =
+                handle_localization_event(tracking_event);
+            if(tracking_transition.cleanup_requested)
+            {
+              ROS_WARN("Localization entered LOST; clearing current-session state.");
+              active_direct_generation = 0;
+              direct_validation_active = false;
+              reset_historical_runtime_cache();
+              system_reset(imus);
+              motion_init_flag = 1;
+              reset_flag = 1;
+              lost_recovery_pending = true;
               continue;
             }
           }
@@ -2204,6 +2405,293 @@ public:
     malloc_trim(0);
   }
 
+  const SavedKeyframe *find_localization_keyframe(int id) const
+  {
+    for(const SavedKeyframe &keyframe: localization_map.keyframes)
+      if(keyframe.id == id) return &keyframe;
+    return nullptr;
+  }
+
+  void thd_localization_btc(ros::NodeHandle &n,
+                            ConfigSetting &config_setting,
+                            double jud_threshold, double icp_eigval)
+  {
+    STDescManager history_manager(config_setting);
+    string error;
+    if(!restore_btc_database(localization_map.btc_frames, history_manager,
+                             error))
+    {
+      ROS_FATAL_STREAM("Failed to restore localization BTC database: "
+                       << error);
+      ros::shutdown();
+      return;
+    }
+
+    BtcRelocalizer relocalizer;
+    if(!relocalizer.initialize(localization_map, prior_map_tracker, error))
+    {
+      ROS_FATAL_STREAM("Failed to initialize BTC relocalizer: " << error);
+      ros::shutdown();
+      return;
+    }
+
+    BtcRelocalizationOptions relocalization_options;
+    relocalization_options.use_prior_position = use_prior_pose_for_btc;
+    relocalization_options.prior_xy = btc_prior_xy;
+    relocalization_options.initial_radius = btc_search_radius;
+    relocalization_options.expand_on_failure = btc_expand_on_failure;
+    relocalization_options.maximum_radius = btc_max_search_radius;
+    relocalization_options.fallback_to_global = btc_fallback_to_global;
+
+    SessionAlignmentOptions alignment_options;
+    alignment_options.max_translation_correction_m =
+        alignment_max_translation_m;
+    alignment_options.max_rotation_correction_deg =
+        alignment_max_rotation_deg;
+
+    deque<ScanPose*> fusion_window;
+    vector<SavedPose> current_odometry;
+    int query_frame_id = 0;
+
+    auto delete_pose = [](ScanPose *pose) {
+      if(pose == nullptr) return;
+      pose->pvec.reset();
+      delete pose;
+    };
+    auto clear_local_session = [&]() {
+      for(ScanPose *pose: fusion_window) delete_pose(pose);
+      fusion_window.clear();
+      current_odometry.clear();
+      lock_guard<mutex> lock(mtx_loop);
+      for(ScanPose *pose: buf_lba2loop) delete_pose(pose);
+      buf_lba2loop.clear();
+      for(ScanPose *pose: buf_lba2loop_tem) delete_pose(pose);
+      buf_lba2loop_tem.clear();
+    };
+
+    while(n.ok())
+    {
+      if(reset_flag == 1)
+      {
+        reset_flag = 0;
+        clear_local_session();
+      }
+      if(is_finish && buf_lba2loop.empty()) break;
+      const LocalizationState state = localization_state_snapshot();
+      if(state == LocalizationState::IN_MAP_TRACKING &&
+         (!fusion_window.empty() || !current_odometry.empty()))
+        clear_local_session();
+      if(state != LocalizationState::LOCAL_ODOMETRY)
+      {
+        ros::Duration(0.01).sleep();
+        continue;
+      }
+
+      ScanPose *head = nullptr;
+      {
+        lock_guard<mutex> lock(mtx_loop);
+        if(!buf_lba2loop.empty())
+        {
+          head = buf_lba2loop.front();
+          buf_lba2loop.pop_front();
+        }
+      }
+      if(head == nullptr)
+      {
+        ros::Duration(0.01).sleep();
+        continue;
+      }
+
+      SavedPose odometry_pose;
+      odometry_pose.stamp = head->x.t;
+      odometry_pose.R = head->x.R;
+      odometry_pose.t = head->x.p;
+      current_odometry.push_back(odometry_pose);
+      fusion_window.push_back(head);
+      if(fusion_window.size() < static_cast<size_t>(win_size))
+        continue;
+
+      ScanPose *anchor = fusion_window.back();
+      error.clear();
+      PVec fused_points;
+      for(ScanPose *pose: fusion_window)
+      {
+        if(pose == nullptr || !pose->pvec)
+        {
+          error = "BTC fusion window contains an invalid scan pose";
+          break;
+        }
+        const Eigen::Matrix3d delta_R =
+            anchor->x.R.transpose() * pose->x.R;
+        const Eigen::Vector3d delta_p =
+            anchor->x.R.transpose() * (pose->x.p - anchor->x.p);
+        for(pointVar point: *pose->pvec)
+        {
+          point.pnt = delta_R * point.pnt + delta_p;
+          point.var = delta_R * point.var * delta_R.transpose();
+          fused_points.push_back(point);
+        }
+      }
+      for(ScanPose *pose: fusion_window) delete_pose(pose);
+      fusion_window.clear();
+      if(!error.empty())
+      {
+        ROS_WARN_STREAM("Skipped BTC query: " << error);
+        error.clear();
+        continue;
+      }
+
+      pcl::PointCloud<pcl::PointXYZI>::Ptr btc_cloud(
+          new pcl::PointCloud<pcl::PointXYZI>());
+      btc_cloud->reserve(fused_points.size());
+      for(const pointVar &point: fused_points)
+      {
+        pcl::PointXYZI output;
+        output.x = point.pnt.x();
+        output.y = point.pnt.y();
+        output.z = point.pnt.z();
+        output.intensity = 0.0F;
+        btc_cloud->push_back(output);
+      }
+
+      STDescManager query_manager(config_setting);
+      vector<STD> descriptors;
+      query_manager.GenerateSTDescs(btc_cloud, descriptors, query_frame_id++);
+      if(query_manager.plane_cloud_vec_.empty())
+      {
+        ROS_WARN("BTC query generation produced no plane cloud.");
+        continue;
+      }
+      pcl::PointCloud<pcl::PointXYZINormal>::Ptr current_planes =
+          query_manager.plane_cloud_vec_.back();
+
+      if(!handle_localization_event(
+             LocalizationEvent::BTC_STARTED).accepted)
+        continue;
+
+      BtcSearchFunction raw_search = make_stdesc_btc_search(
+          history_manager, descriptors, current_planes);
+      BtcSearchFunction score_checked_search =
+          [raw_search, jud_threshold](const std::unordered_set<int> &allowed,
+                                     BtcSearchMatch &match,
+                                     string &failure_reason) {
+            if(!raw_search(allowed, match, failure_reason)) return false;
+            if(match.score <= jud_threshold)
+            {
+              failure_reason = "BTC score is below the configured threshold";
+              return false;
+            }
+            return true;
+          };
+      IcpVerificationFunction icp_verifier =
+          [&history_manager, current_planes, icp_eigval](
+              int frame_id, Eigen::Matrix3d &R_HC, Eigen::Vector3d &t_HC,
+              double &observability, string &failure_reason) {
+            if(frame_id < 0 ||
+               static_cast<size_t>(frame_id) >=
+                   history_manager.plane_cloud_vec_.size() ||
+               !history_manager.plane_cloud_vec_[frame_id])
+            {
+              failure_reason = "BTC ICP references an invalid history frame";
+              return false;
+            }
+            pair<Eigen::Vector3d, Eigen::Matrix3d> transform(t_HC, R_HC);
+            if(!icp_normal(*current_planes,
+                           *history_manager.plane_cloud_vec_[frame_id],
+                           transform, icp_eigval))
+            {
+              failure_reason = "BTC candidate failed local-map ICP";
+              return false;
+            }
+            t_HC = transform.first;
+            R_HC = transform.second;
+            observability = icp_eigval;
+            failure_reason.clear();
+            return true;
+          };
+
+      const RelocalizationResult relocalization = relocalizer.relocalize(
+          relocalization_options, score_checked_search, icp_verifier);
+      if(!relocalization.success)
+      {
+        ROS_WARN_STREAM("BTC relocalization failed: "
+                        << relocalization.failure_reason);
+        handle_localization_event(LocalizationEvent::BTC_FAILED);
+        continue;
+      }
+      if(!handle_localization_event(
+             LocalizationEvent::BTC_MATCHED).accepted)
+        continue;
+
+      const SavedKeyframe *history_anchor =
+          find_localization_keyframe(relocalization.anchor_keyframe_id);
+      if(history_anchor == nullptr || current_odometry.empty())
+      {
+        error = "BTC alignment anchor is unavailable";
+        handle_localization_event(LocalizationEvent::BTC_FAILED);
+        continue;
+      }
+      SessionAlignmentResult alignment;
+      if(!align_current_session_to_map(
+             history_anchor->pose,
+             static_cast<int>(current_odometry.size() - 1),
+             relocalization.R_HC, relocalization.t_HC, current_odometry,
+             alignment_options, alignment, error))
+      {
+        ROS_WARN_STREAM("BTC session alignment failed: " << error);
+        handle_localization_event(LocalizationEvent::BTC_FAILED);
+        continue;
+      }
+      bool correction_succeeded = false;
+      {
+        lock_guard<mutex> pipeline_lock(frontend_pipeline_mutex);
+        if(localization_state_snapshot() != LocalizationState::ALIGNING ||
+           alignment_source_snapshot() != AlignmentSource::BTC)
+          continue;
+
+        if(!rebuild_historical_local_map(
+               alignment.optimized_current.back().t, error))
+        {
+          ROS_WARN_STREAM("BTC historical-map build failed: " << error);
+          handle_localization_event(LocalizationEvent::BTC_FAILED);
+          frontend_reset_requested.store(true);
+          continue;
+        }
+        IMUST correction;
+        correction.R = alignment.T_W_O.R;
+        correction.p = alignment.T_W_O.t;
+        const bool btc_alignment_still_active = run_if_active_alignment(
+            AlignmentSource::BTC, [&]() {
+              correction_succeeded =
+                  apply_frontend_global_correction(correction, error);
+            });
+        if(!btc_alignment_still_active)
+          continue;
+        if(correction_succeeded &&
+           !handle_localization_event(
+                LocalizationEvent::ALIGNMENT_APPLIED).accepted)
+        {
+          correction_succeeded = false;
+          error = "localization state rejected the BTC alignment";
+        }
+      }
+      if(!correction_succeeded)
+      {
+        ROS_WARN_STREAM("BTC frontend correction failed: " << error);
+        handle_localization_event(LocalizationEvent::BTC_FAILED);
+        reset_historical_runtime_cache();
+        frontend_reset_requested.store(true);
+        continue;
+      }
+      ROS_INFO_STREAM("BTC localization validated with history frame "
+                      << relocalization.btc_frame_id << " at score "
+                      << relocalization.score);
+      clear_local_session();
+    }
+
+    clear_local_session();
+  }
+
   // Build the pose graph in loop closure
   void build_graph(gtsam::Values &initial, gtsam::NonlinearFactorGraph &graph, int cur_id, PGO_Edges &lp_edges, gtsam::noiseModel::Diagonal::shared_ptr default_noise, vector<int> &ids, vector<int> &stepsizes, int lpedge_enable)
   {
@@ -2316,12 +2804,15 @@ public:
         ros::shutdown();
         return;
       }
+      handle_localization_event(LocalizationEvent::MAP_LOADED);
       prior_map_ready.store(true);
       ROS_INFO_STREAM("Loaded localization map package with "
                       << localization_map.keyframes.size()
                       << " keyframes and "
                       << localization_map.btc_frames.size()
                       << " BTC frames.");
+      thd_localization_btc(n, config_setting, jud_default, icp_eigval);
+      return;
     }
 
     vector<double> juds;

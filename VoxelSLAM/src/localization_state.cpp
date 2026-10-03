@@ -130,3 +130,181 @@ bool make_direct_pose_seed(
   seed = candidate;
   return true;
 }
+
+LocalizationStateMachine::LocalizationStateMachine(int bad_tracking_limit)
+    : bad_tracking_limit_(bad_tracking_limit > 0 ? bad_tracking_limit : 5) {}
+
+LocalizationTransition LocalizationStateMachine::reject(
+    std::string &warning) const {
+  warning = "illegal localization state transition";
+  return LocalizationTransition();
+}
+
+LocalizationTransition LocalizationStateMachine::enter_lost() {
+  state_ = LocalizationState::LOST;
+  localization_valid_ = false;
+  bad_tracking_streak_ = 0;
+  ++cleanup_count_;
+  LocalizationTransition transition;
+  transition.accepted = true;
+  transition.cleanup_requested = true;
+  return transition;
+}
+
+LocalizationTransition LocalizationStateMachine::handle(
+    LocalizationEvent event, std::string &warning) {
+  warning.clear();
+  LocalizationTransition accepted;
+  accepted.accepted = true;
+
+  switch (event) {
+    case LocalizationEvent::MAP_LOADED:
+      if (state_ != LocalizationState::WAITING_FOR_MAP) {
+        return reject(warning);
+      }
+      map_loaded_ = true;
+      state_ = LocalizationState::LOCAL_ODOMETRY;
+      return accepted;
+
+    case LocalizationEvent::BTC_STARTED:
+      if (!map_loaded_ || state_ != LocalizationState::LOCAL_ODOMETRY) {
+        return reject(warning);
+      }
+      state_ = LocalizationState::RELOCALIZING;
+      localization_valid_ = false;
+      alignment_source_ = AlignmentSource::BTC;
+      return accepted;
+
+    case LocalizationEvent::BTC_MATCHED:
+      if (state_ != LocalizationState::RELOCALIZING) {
+        return reject(warning);
+      }
+      state_ = LocalizationState::ALIGNING;
+      alignment_source_ = AlignmentSource::BTC;
+      return accepted;
+
+    case LocalizationEvent::BTC_FAILED:
+      if (state_ != LocalizationState::RELOCALIZING &&
+          !(state_ == LocalizationState::ALIGNING &&
+            alignment_source_ == AlignmentSource::BTC)) {
+        return reject(warning);
+      }
+      state_ = LocalizationState::LOCAL_ODOMETRY;
+      localization_valid_ = false;
+      bad_tracking_streak_ = 0;
+      return accepted;
+
+    case LocalizationEvent::ALIGNMENT_APPLIED:
+      if (state_ != LocalizationState::ALIGNING ||
+          alignment_source_ != AlignmentSource::BTC) {
+        return reject(warning);
+      }
+      state_ = LocalizationState::IN_MAP_TRACKING;
+      localization_valid_ = true;
+      bad_tracking_streak_ = 0;
+      return accepted;
+
+    case LocalizationEvent::DIRECT_POSE_STARTED:
+      if (!map_loaded_ || state_ == LocalizationState::WAITING_FOR_MAP) {
+        return reject(warning);
+      }
+      state_ = LocalizationState::ALIGNING;
+      alignment_source_ = AlignmentSource::RVIZ_INITIAL_POSE;
+      localization_valid_ = false;
+      bad_tracking_streak_ = 0;
+      return accepted;
+
+    case LocalizationEvent::DIRECT_POSE_VALIDATED:
+      if (state_ != LocalizationState::ALIGNING ||
+          alignment_source_ != AlignmentSource::RVIZ_INITIAL_POSE) {
+        return reject(warning);
+      }
+      state_ = LocalizationState::IN_MAP_TRACKING;
+      localization_valid_ = true;
+      bad_tracking_streak_ = 0;
+      return accepted;
+
+    case LocalizationEvent::DIRECT_POSE_FAILED:
+      if (state_ != LocalizationState::ALIGNING ||
+          alignment_source_ != AlignmentSource::RVIZ_INITIAL_POSE) {
+        return reject(warning);
+      }
+      state_ = LocalizationState::LOCAL_ODOMETRY;
+      localization_valid_ = false;
+      bad_tracking_streak_ = 0;
+      ++cleanup_count_;
+      accepted.cleanup_requested = true;
+      return accepted;
+
+    case LocalizationEvent::TRACKING_GOOD:
+      if (state_ != LocalizationState::IN_MAP_TRACKING) {
+        return reject(warning);
+      }
+      bad_tracking_streak_ = 0;
+      return accepted;
+
+    case LocalizationEvent::TRACKING_BAD:
+      if (state_ != LocalizationState::IN_MAP_TRACKING) {
+        return reject(warning);
+      }
+      ++bad_tracking_streak_;
+      if (bad_tracking_streak_ >= bad_tracking_limit_) {
+        return enter_lost();
+      }
+      return accepted;
+
+    case LocalizationEvent::TRACKING_NONFINITE:
+      if (state_ != LocalizationState::IN_MAP_TRACKING) {
+        return reject(warning);
+      }
+      return enter_lost();
+
+    case LocalizationEvent::RECOVERY_STARTED:
+      if (state_ != LocalizationState::LOST || !map_loaded_) {
+        return reject(warning);
+      }
+      state_ = LocalizationState::LOCAL_ODOMETRY;
+      localization_valid_ = false;
+      bad_tracking_streak_ = 0;
+      return accepted;
+  }
+  return reject(warning);
+}
+
+LocalizationState LocalizationStateMachine::state() const { return state_; }
+
+AlignmentSource LocalizationStateMachine::alignment_source() const {
+  return alignment_source_;
+}
+
+bool LocalizationStateMachine::map_loaded() const { return map_loaded_; }
+
+bool LocalizationStateMachine::localization_valid() const {
+  return localization_valid_;
+}
+
+int LocalizationStateMachine::bad_tracking_streak() const {
+  return bad_tracking_streak_;
+}
+
+std::uint64_t LocalizationStateMachine::cleanup_count() const {
+  return cleanup_count_;
+}
+
+const char *localization_state_name(LocalizationState state) {
+  switch (state) {
+    case LocalizationState::WAITING_FOR_MAP:
+      return "WAITING_FOR_MAP";
+    case LocalizationState::LOCAL_ODOMETRY:
+      return "LOCAL_ODOMETRY";
+    case LocalizationState::RELOCALIZING:
+      return "RELOCALIZING";
+    case LocalizationState::ALIGNING:
+      return "ALIGNING";
+    case LocalizationState::IN_MAP_TRACKING:
+      return "IN_MAP_TRACKING";
+    case LocalizationState::LOST:
+      return "LOST";
+  }
+  return "UNKNOWN";
+}
