@@ -135,6 +135,17 @@ if(CATKIN_ENABLE_TESTING)
       ${PCL_LIBRARIES}
     )
   endif()
+
+  catkin_add_gtest(session_aligner_test
+    test/session_aligner_test.cpp
+  )
+  if(TARGET session_aligner_test)
+    target_link_libraries(session_aligner_test
+      voxel_slam_map_io
+      ${catkin_LIBRARIES}
+      gtsam
+    )
+  endif()
 endif()
 
 
