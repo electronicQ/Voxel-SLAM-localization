@@ -203,7 +203,9 @@ TEST(BtcRelocalizer, RejectsInvalidAnchorMappingsAtomically) {
 
   SavedMap invalid = map;
   invalid.btc_frames[1].anchor_keyframe_id = 10;
-  EXPECT_FALSE(relocalizer.initialize(invalid, tracker, error));
+  PriorMapTracker invalid_tracker;
+  ASSERT_TRUE(invalid_tracker.initialize(invalid, error)) << error;
+  EXPECT_FALSE(relocalizer.initialize(invalid, invalid_tracker, error));
   EXPECT_NE(error.find("duplicate"), std::string::npos) << error;
 
   int calls = 0;

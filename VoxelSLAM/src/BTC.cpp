@@ -1290,7 +1290,7 @@ void STDescManager::candidate_selector(
     const int max_vote = static_cast<int>(match_array[max_vote_index]);
 
     STDMatchList match_triangle_list;
-    if (max_vote_index >= 0 && max_vote >= 5) 
+    if (max_vote >= 5)
     {
       match_array[max_vote_index] = 0;
       match_triangle_list.match_frame_ = max_vote_index;
