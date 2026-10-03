@@ -1,168 +1,178 @@
-# Voxel-SLAM: A Complete, Accurate, and Versatile LiDAR-Inertial SLAM System
+# Voxel-SLAM：完整、精确且通用的激光雷达-惯性 SLAM 系统
 
-## 1. Introduction
+## 1. 项目简介
 
-**Voxel-SLAM** is a complete, accurate, and versatile LiDAR-inertial SLAM system that fully utilizes short-term, mid-term, long-term, and multi-map data associations. It includes five modules: initialization, odometry, local mapping, loop closure, and global mapping. The initialization can provide accurate states and local map in a static or dynamic initial state. The odometry estimates current states and detect potential system divergence. The local mapping refine the states and local map within the sliding window by a LiDAR-inertial BA. The loop closure can detect in multiple sessions. The global mapping refine the global map with an efficient hierarchical global BA. The system overview is:
+**Voxel-SLAM** 是一套完整、精确且通用的激光雷达-惯性 SLAM 系统，充分利用短期、中期、长期以及多地图数据关联。系统包含初始化、里程计、局部建图、回环检测和全局建图五个模块。
+
+初始化模块能够在静止或运动的初始状态下提供精确的状态估计和局部地图；里程计模块估计当前状态并检测系统可能出现的发散；局部建图模块通过激光雷达-惯性束调整（BA）优化滑动窗口内的状态与局部地图；回环检测支持跨多个会话进行匹配；全局建图模块通过高效的分层全局束调整优化全局地图。系统总体结构如下：
 
 <div align="center">
     <a href="https://youtu.be/Cg9W01aIUzE" target="_blank">
     <img src="./figure/systemoverview.png" width = 60% >
 </div>
 
-### 1.1 Related Video
+### 1.1 相关视频
 
-The video of **Voxel-SLAM** is available on [YouTube](https://youtu.be/Cg9W01aIUzE).
+**Voxel-SLAM** 的演示视频可在 [YouTube](https://youtu.be/Cg9W01aIUzE) 上观看。
 
-### 1.2 Related works
+### 1.2 相关工作
 
-Related paper is available on [**arxiv**](https://arxiv.org/abs/2410.08935).
+相关论文可在 [arXiv](https://arxiv.org/abs/2410.08935) 上查看。
 
-### 1.3 Competitions
+### 1.3 竞赛成绩
 
-Voxel-SLAM has been served as a subsystem to participate in [ICRA HILTI 2023 SLAM Challenge](https://hilti-challenge.com/leader-board-2023.html) (**2nd** place on the LiDAR single-session) and [ICCV 2023 SLAM Challenge](https://superodometry.com/iccv23_challenge_LiI) (**1st** place on the LiDAR inertial track).
+Voxel-SLAM 曾作为子系统参加 [ICRA HILTI 2023 SLAM Challenge](https://hilti-challenge.com/leader-board-2023.html)，获得激光雷达单会话赛道第 **2** 名；参加 [ICCV 2023 SLAM Challenge](https://superodometry.com/iccv23_challenge_LiI)，获得激光雷达-惯性赛道第 **1** 名。
 
-## 2. Prerequisited
+## 2. 环境依赖
 
-Ubuntu=20.04. [ROS =Noetic](http://wiki.ros.org/ROS/Installation). [PCL=1.10](https://pointclouds.org/). [Eigen=3.3.7](https://eigen.tuxfamily.org/index.php?title=Main_Page)
+- Ubuntu 20.04
+- [ROS Noetic](http://wiki.ros.org/ROS/Installation)
+- [PCL 1.10](https://pointclouds.org/)
+- [Eigen 3.3.7](https://eigen.tuxfamily.org/index.php?title=Main_Page)
+- [GTSAM 4.0.3](https://github.com/borglab/gtsam/releases?page=2)
+- [livox_ros_driver](https://github.com/Livox-SDK/livox_ros_driver)
 
-[GTSAM=4.0.3](https://github.com/borglab/gtsam/releases?page=2)
+## 3. 编译
 
-[livox_ros_driver](https://github.com/Livox-SDK/livox_ros_driver)
-
-## 3. Build
-
-```
+```bash
 cd ~/catkin_ws/src
 git clone https://github.com/hku-mars/Voxel-SLAM
-cd ../ && catkin_make
+cd ..
+catkin_make
 source ~/catkin_ws/devel/setup.bash
 ```
 
-## 4. Run Voxel-SLAM
+## 4. 运行 Voxel-SLAM
 
 ### 4.1 Livox Avia
 
-The online relocalization experiment rosbag. Download: [Onedrive](https://1drv.ms/f/c/8b1ef18ae4181c8d/ErEznhkJzTxJiLuJ8AQDGS0BvCy6KsuaWF2D6cnx061GEQ?e=dMRSlf) ([Google Drive](https://drive.google.com/file/d/1LG46i0vreQrMZRap5tJkjKK4IX0t0zfC/view?usp=drive_link))
+在线重定位实验所使用的 rosbag 可从 [OneDrive](https://1drv.ms/f/c/8b1ef18ae4181c8d/ErEznhkJzTxJiLuJ8AQDGS0BvCy6KsuaWF2D6cnx061GEQ?e=dMRSlf) 或 [Google Drive](https://drive.google.com/file/d/1LG46i0vreQrMZRap5tJkjKK4IX0t0zfC/view?usp=drive_link) 下载。
 
+```bash
+roslaunch voxel_slam vxlm_avia.launch
+# 使用 --pause 可以保证不同实验从相同的 rosbag 时刻开始。
+# 按空格键开始播放。
+rosbag play compus_elevator.bag --pause
 ```
-roslaunch roslaunch voxel_slam vxlm_avia.launch
-// Using the "--pause" guarantees the bag benning time are the same in different runs
-// Press the Space to start
-rosbag play compus_elevator.bag --pause 
-```
 
-In the elevator, the system continues to restart until stepping out of the evevator. The blue point cloud is the map from initialization.
+设备位于电梯内时，系统会持续尝试重新初始化，直到设备离开电梯。蓝色点云表示初始化阶段建立的地图。
 
-After the rosbag is done, your may find the map is inconsistent as shown in the video. Run
+rosbag 播放结束后，地图可能会像演示视频中一样存在不一致。执行以下命令启动最终的全局建图（全局束调整），以优化全局地图：
 
-```
+```bash
 rosparam set finish true
 ```
 
-to launch the final global mapping (global bundle adjustment) to refine the global map.
+### 4.2 HILTI 2023（多会话）
 
-### 4.2 HILTI 2023 (Multi-Session)
+多会话实验 rosbag 可从 [OneDrive](https://1drv.ms/f/c/8b1ef18ae4181c8d/Epp5AQ2Oq1VNhC6MIuCAtN4BJC9jx9VvuVx7VT_cdlvD0A?e=8mXYdc) 下载并进行快速测试。完整的 HILTI 2022 和 HILTI 2023 数据可从[官方网站](https://hilti-challenge.com/index.html)获取。
 
-The multi-session experiment rosbag. 
+建议按照 `site1_handheld_5` 到 `site1_handheld_1` 的顺序播放 rosbag，否则 `site1_handheld_2` 和 `site1_handheld_3` 可能无法检测到回环。
 
-For quick test to download: [Onedrive](https://1drv.ms/f/c/8b1ef18ae4181c8d/Epp5AQ2Oq1VNhC6MIuCAtN4BJC9jx9VvuVx7VT_cdlvD0A?e=8mXYdc). The whole rosbags of HILTI 2022 and 2023 are on the [website](https://hilti-challenge.com/index.html).
+启动前，请在 `hesai.yaml` 中配置以下参数。`#` 表示注释：
 
-The rosbag had better be played from "site1_handheld_5" to "site_handheld_1", or the "site_handheld_2" and "site_handheld_3" cannot find the loop. 
-
-Before launching, please set configure the variables in "hesai.yaml". The '#' means annotation
-
-```
+```yaml
 # hesai.yaml
 save_path: "${YOUR_FILE_PATH_TO_SAVE_THE_OFFLINE_MAP}"
-previous_map: "# site1_handheld_5: 0.50, 
+previous_map: "# site1_handheld_5: 0.50,
                # site1_handheld_4: 0.45,
                # site1_handheld_3: 0.30,
                # site1_handheld_2: 0.50"
-bagname: "site1_handheld_${1-5}" # The rosbag name you play
-is_save_map: 1 # Enable to save the map
+bagname: "site1_handheld_${1-5}" # 当前播放的 rosbag 名称
+is_save_map: 1 # 启用地图保存
 ```
 
-```
+首先运行 `site1_handheld_5`：
+
+```bash
 roslaunch voxel_slam vxlm_hesai.launch
 rosbag play site1_handheld_5.bag --pause
 ```
 
-```
-roslaunch voxel_slam vxlm_hesai.launch // Load the site_handheld_5
+加载 `site1_handheld_5`，然后运行 `site1_handheld_4`：
+
+```bash
+roslaunch voxel_slam vxlm_hesai.launch
 rosbag play site1_handheld_4.bag --pause
 ```
 
-```
-roslaunch voxel_slam vxlm_hesai.launch // Load the site_handheld_{5, 4}
+加载 `site1_handheld_5` 和 `site1_handheld_4`，然后运行 `site1_handheld_3`：
+
+```bash
+roslaunch voxel_slam vxlm_hesai.launch
 rosbag play site1_handheld_3.bag --pause
 ```
 
-For the "site1_handheld_2", do not forget load the offline maps. The "hesai.yaml" should be like this
+运行 `site1_handheld_2` 前不要忘记加载已有离线地图，此时 `hesai.yaml` 应类似如下配置：
 
-```
+```yaml
 # hesai.yaml
 save_path: "${YOUR_FILE_PATH_TO_SAVE_THE_OFFLINE_MAP}"
-previous_map: "site1_handheld_5: 0.50, 
+previous_map: "site1_handheld_5: 0.50,
                site1_handheld_4: 0.45,
                site1_handheld_3: 0.30,
                # site1_handheld_2: 0.50"
-bagname: "site1_handheld_2" # The rosbag name you play
-is_save_map: 1 # Enable to save the map
+bagname: "site1_handheld_2" # 当前播放的 rosbag 名称
+is_save_map: 1 # 启用地图保存
 ```
 
-```
-roslaunch voxel_slam vxlm_hesai.launch // Load the site_handheld_{5, 4, 3}
+加载 `site1_handheld_5`、`site1_handheld_4` 和 `site1_handheld_3`，然后运行 `site1_handheld_2`：
+
+```bash
+roslaunch voxel_slam vxlm_hesai.launch
 rosbag play site1_handheld_2.bag --pause
 ```
 
-```
-roslaunch voxel_slam vxlm_hesai.launch // Load the site_handheld_{5, 4, 3, 2}
+加载前四个会话后运行 `site1_handheld_1`：
+
+```bash
+roslaunch voxel_slam vxlm_hesai.launch
 rosbag play site1_handheld_1.bag --pause
 ```
 
-The map may not be consistent as shown in the video. Run
+地图可能仍会出现演示视频中的不一致。执行以下命令进行最终全局束调整：
 
-```
+```bash
 rosparam set finish true
 ```
 
-for the final global BA.
+### 4.3 MARS 数据集
 
-### 4.3 MARS Dataset
+快速测试数据可从 [OneDrive](https://1drv.ms/f/c/8b1ef18ae4181c8d/EpjsGW6coYlMvBWo8TlgJXoBttAuoocLi24V6kw-r_3A8w?e=vVB6RY) 下载，完整 MARS 数据集可从[官方网站](https://mars.hku.hk/dataset.html)获取。
 
-For quick test to download: [Onedrive](https://1drv.ms/f/c/8b1ef18ae4181c8d/EpjsGW6coYlMvBWo8TlgJXoBttAuoocLi24V6kw-r_3A8w?e=vVB6RY). The whole rosbags of MARS dataset are on the [website](https://mars.hku.hk/dataset.html).
-
-```
+```bash
 roslaunch voxel_slam vxlm_avia_fly.launch
 rosbag play HKisland03.bag --pause
 ```
 
-The beginning of the point cloud is empty and failing to initialize until the drone at a certain height.
+该数据起始阶段点云为空，系统会持续尝试初始化，直到无人机上升到一定高度。
 
-```
+```bash
 roslaunch voxel_slam vxlm_avia_fly.launch
 rosbag play AMvalley03.bag --pause
 rosparam set finish true
 ```
 
-This sequence is difficult to find loop. Please run the GBA to ensure the global map consistence.
+该序列较难检测到回环，请运行 GBA 以保证全局地图的一致性。
 
-### 4.4 Livox Mid360
+### 4.4 Livox Mid-360
 
-The rosbag begin in a violent speed: [Onedrive](https://1drv.ms/f/c/8b1ef18ae4181c8d/ErtuXCFhFrBErZxzS5vLASkBJEfgDB9R2CSCgKe8BwhneQ?e=zbr7NL)
+该 rosbag 开始时运动速度较快，可从 [OneDrive](https://1drv.ms/f/c/8b1ef18ae4181c8d/ErtuXCFhFrBErZxzS5vLASkBJEfgDB9R2CSCgKe8BwhneQ?e=zbr7NL) 下载。
 
-```
+```bash
 roslaunch voxel_slam vxlm_mid360.launch
 rosbag play jungle_challenge.bag --pause
 ```
 
-### 4.5 Build a reusable map and localize in it
+### 4.5 构建可复用地图并进行定位
 
-Mapping and localization use the same `voxelslam` executable. To export a map
-package, keep `General/mode: mapping` and set `General/map_export_path` in
-`VoxelSLAM/config/mid360.yaml`. The destination must not exist yet, while its
-parent directory must already exist. Run mapping normally, then request final
-global optimization and export:
+建图和定位使用同一个 `voxelslam` 可执行程序。
+
+#### 4.5.1 导出定位地图
+
+在建图配置中保持 `General/mode: mapping`，并在 `VoxelSLAM/config/mid360.yaml` 中设置 `General/map_export_path`。目标目录必须尚不存在，但其父目录必须已经存在。
+
+正常运行建图，然后触发最终全局优化和地图导出：
 
 ```bash
 roslaunch voxel_slam vxlm_mid360.launch
@@ -170,12 +180,11 @@ rosbag play mapping.bag --pause
 rosparam set finish true
 ```
 
-The package contains optimized keyframe poses, local-frame keyframe clouds,
-BTC descriptors and BTC plane clouds. It is written transactionally only after
-the final optimization completes.
+导出的地图包包含优化后的关键帧位姿、关键帧局部坐标系点云、BTC 描述子和 BTC 平面点云。程序仅在最终优化完成后以事务方式写入地图包，避免留下不完整目录。
 
-For localization, set `Localization/map_path` in
-`VoxelSLAM/config/localization_mid360.yaml`, or pass it to the launch file:
+#### 4.5.2 启动地图定位
+
+可以在 `VoxelSLAM/config/localization_mid360.yaml` 中设置 `Localization/map_path`，也可以通过 launch 参数传入地图路径：
 
 ```bash
 roslaunch voxel_slam vxlm_localization_mid360.launch \
@@ -183,34 +192,32 @@ roslaunch voxel_slam vxlm_localization_mid360.launch \
 rosbag play localization.bag --pause
 ```
 
-`use_prior_pose_for_btc: true` restricts BTC history candidates to keyframes
-within `btc_search_radius` of `btc_prior_pose.x/y`. Failures expand the radius
-up to `btc_max_search_radius`, then optionally search globally. Candidate
-selection deliberately has no yaw constraint. If `use_prior_pose_for_btc` is
-false, the prior pose and all radius/expansion/fallback settings are ignored
-and BTC starts with a global search.
+当 `use_prior_pose_for_btc: true` 时，BTC 仅从 `btc_prior_pose.x/y` 周围 `btc_search_radius` 范围内的历史关键帧中选择候选。匹配失败后，搜索半径会逐步扩大到 `btc_max_search_radius`，随后可根据配置回退到全局搜索。候选筛选有意不使用 yaw 约束。
 
-RViz **2D Pose Estimate** is always an independent initialization path when
-`rviz_initialpose_enabled` is true. Its x/y/yaw are treated as the current
-vehicle pose in `map`; roll/pitch come from the live IMU and z comes from the
-nearest historical keyframe in XY. It bypasses BTC, but localization becomes
-valid only after `direct_pose_validation_scans` consecutive local historical
-map matches. A newer RViz request replaces an older request.
+当 `use_prior_pose_for_btc: false` 时，先验位置以及半径、扩展和回退设置均不参与候选筛选，BTC 会直接进行全局搜索。
 
-The latched status topics are:
+#### 4.5.3 使用 RViz 设置初始位姿
 
-- `/localization/state` (`std_msgs/String`): `WAITING_FOR_MAP`,
-  `LOCAL_ODOMETRY`, `RELOCALIZING`, `ALIGNING`, `IN_MAP_TRACKING`, or `LOST`.
-- `/localization/valid` (`std_msgs/Bool`): true only after BTC alignment or RViz
-  local-map validation has succeeded.
+当 `rviz_initialpose_enabled` 为 `true` 时，RViz 的 **2D Pose Estimate** 始终是一条独立的初始化路径：
 
-After the configured number of bad tracking scans, or immediately after a
-non-finite solve, the system enters `LOST`, clears only current-session state,
-and automatically returns to local odometry plus BTC recovery. The loaded map,
-historical BTC database, and keyframe indexes remain immutable.
+- x、y 和 yaw 取自 RViz 输入，表示车辆当前在 `map` 坐标系中的位姿。
+- roll 和 pitch 取自实时 IMU 姿态。
+- z 取自 XY 平面内距离输入位置最近的历史关键帧高度。
+- 该路径跳过 BTC，但只有在连续 `direct_pose_validation_scans` 帧通过局部历史地图匹配验证后，定位才会生效。
+- 新的 RViz 位姿请求会替换尚未完成的旧请求。
 
-To evaluate a TUM-format estimate against a map-frame TUM reference and verify
-that the map package did not change:
+#### 4.5.4 定位状态与自动恢复
+
+程序发布以下锁存状态话题：
+
+- `/localization/state`（`std_msgs/String`）：可能为 `WAITING_FOR_MAP`、`LOCAL_ODOMETRY`、`RELOCALIZING`、`ALIGNING`、`IN_MAP_TRACKING` 或 `LOST`。
+- `/localization/valid`（`std_msgs/Bool`）：只有 BTC 对齐成功或 RViz 初始位姿通过局部地图验证后才为 `true`。
+
+当坏帧数量达到配置阈值，或求解结果出现非有限数值时，系统会进入 `LOST` 状态。系统只清理当前会话状态，并自动返回局部里程计和 BTC 恢复流程；已经加载的地图、历史 BTC 数据库和关键帧索引保持不变。
+
+#### 4.5.5 定位结果评估
+
+使用以下命令，将 TUM 格式的估计轨迹与地图坐标系下的 TUM 真值轨迹进行比较，并检查定位过程中地图包是否发生变化：
 
 ```bash
 python3 VoxelSLAM/scripts/evaluate_localization.py \
@@ -219,22 +226,25 @@ python3 VoxelSLAM/scripts/evaluate_localization.py \
   --map-dir /absolute/path/to/map_package
 ```
 
-The evaluator reports map-frame ATE RMSE without post-hoc alignment,
-translational/rotational RPE, per-file SHA-256 values, and a deterministic
-whole-tree SHA-256. Re-run it before and after localization; all map hashes must
-remain identical.
+评估工具输出以下结果：
 
-### 4.6 Others
+- 不进行事后对齐的地图坐标系 ATE RMSE。
+- 平移 RPE 和旋转 RPE。
+- 地图包中每个文件的 SHA-256。
+- 与路径相关且结果确定的整目录 SHA-256。
 
-Other types of LiDAR will be released later.
+建议在定位前后分别运行一次评估工具，两次输出的所有地图哈希值必须完全一致。
+
+### 4.6 其他类型激光雷达
+
+其他类型激光雷达的支持将在后续发布。
 
 ## 5. VoxelSLAMPointCloud2
 
-**VoxelSLAMPointCloud2**: A customized plugin for RViz. It has the same usage to original "PointCloud2" in RViz, but it can **clear the point cloud map automatically** when receiving an empty point cloud, with any **Decay Time** of the plugin. 
+**VoxelSLAMPointCloud2** 是一个定制的 RViz 插件，用法与原生 `PointCloud2` 基本一致。无论插件的 **Decay Time** 设置为何，当插件收到空点云时，都可以自动清除当前显示的点云地图。
 
-(1) Put the "VoxelSLAMPointCloud2" within the same "src" folder to your project and catkin_make.
+使用步骤：
 
-(2) “roslaunch” your program with RViz. 
-
-(3) Click the "Add" button to add the "VoxelSLAMPointCloud2".
-
+1. 将 `VoxelSLAMPointCloud2` 放入 catkin 工作空间的同一个 `src` 目录，然后执行 `catkin_make`。
+2. 使用 `roslaunch` 启动程序和 RViz。
+3. 在 RViz 中单击 **Add**，添加 `VoxelSLAMPointCloud2` 显示项。
