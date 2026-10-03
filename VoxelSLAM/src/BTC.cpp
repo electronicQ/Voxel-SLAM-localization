@@ -207,6 +207,28 @@ void STDescManager::SearchLoop(
     std::pair<Eigen::Vector3d, Eigen::Matrix3d> &loop_transform,
     std::vector<std::pair<STD, STD>> &loop_std_pair, pcl::PointCloud<pcl::PointXYZINormal>::Ptr pl_cur) 
 {
+  SearchLoopImpl(stds_vec, loop_result, loop_transform, loop_std_pair, pl_cur,
+                 nullptr, false);
+}
+
+void STDescManager::SearchLoop(
+    std::vector<STD> &stds_vec, std::pair<int, double> &loop_result,
+    std::pair<Eigen::Vector3d, Eigen::Matrix3d> &loop_transform,
+    std::vector<std::pair<STD, STD>> &loop_std_pair,
+    pcl::PointCloud<pcl::PointXYZINormal>::Ptr pl_cur,
+    const std::unordered_set<int> &allowed_frame_ids)
+{
+  SearchLoopImpl(stds_vec, loop_result, loop_transform, loop_std_pair, pl_cur,
+                 &allowed_frame_ids, true);
+}
+
+void STDescManager::SearchLoopImpl(
+    std::vector<STD> &stds_vec, std::pair<int, double> &loop_result,
+    std::pair<Eigen::Vector3d, Eigen::Matrix3d> &loop_transform,
+    std::vector<std::pair<STD, STD>> &loop_std_pair,
+    pcl::PointCloud<pcl::PointXYZINormal>::Ptr pl_cur,
+    const std::unordered_set<int> *allowed_frame_ids, bool cross_session)
+{
   if (stds_vec.size() == 0) {
     // ROS_ERROR_STREAM("No STDescs!");
     loop_result = std::pair<int, double>(-1, 0);
@@ -214,7 +236,8 @@ void STDescManager::SearchLoop(
   }
   // step1, select candidates, default number 50
   std::vector<STDMatchList> candidate_matcher_vec;
-  candidate_selector(stds_vec, candidate_matcher_vec);
+  candidate_selector(stds_vec, candidate_matcher_vec, allowed_frame_ids,
+                     cross_session);
 
   // step2, select best candidates from rough candidates
   double best_score = 0;
@@ -1127,8 +1150,14 @@ void STDescManager::generate_std(
 
 void STDescManager::candidate_selector(
     std::vector<STD> &current_STD_list,
-    std::vector<STDMatchList> &candidate_matcher_vec) 
+    std::vector<STDMatchList> &candidate_matcher_vec,
+    const std::unordered_set<int> *allowed_frame_ids, bool cross_session)
 {
+  candidate_matcher_vec.clear();
+  if (plane_cloud_vec_.empty() ||
+      (allowed_frame_ids != nullptr && allowed_frame_ids->empty())) {
+    return;
+  }
   std::vector<double> match_array(plane_cloud_vec_.size(), 0);
   std::vector<int> match_list_index;
   std::vector<Eigen::Vector3i> voxel_round;
@@ -1181,9 +1210,19 @@ void STDescManager::candidate_selector(
           bool is_push_position = false;
           for (size_t j = 0; j < iter->second.size(); j++) 
           {
-            if ((descriptor.frame_number_ -
-                  iter->second[j].frame_number_) >
-                config_setting_.skip_near_num_) 
+            const int history_frame = iter->second[j].frame_number_;
+            if (history_frame < 0 ||
+                static_cast<size_t>(history_frame) >= match_array.size()) {
+              continue;
+            }
+            if (allowed_frame_ids != nullptr &&
+                allowed_frame_ids->find(history_frame) ==
+                    allowed_frame_ids->end()) {
+              continue;
+            }
+            if (cross_session ||
+                (descriptor.frame_number_ - history_frame) >
+                    config_setting_.skip_near_num_)
             {
               double dis =
                   (descriptor.triangle_ - iter->second[j].triangle_)
@@ -1245,8 +1284,10 @@ void STDescManager::candidate_selector(
     //   }
     // }
 
-    double max_vote_index = std::max_element(match_array.begin(), match_array.end()) - match_array.begin();
-    int max_vote = match_array[max_vote_index];
+    const size_t max_vote_index =
+        std::max_element(match_array.begin(), match_array.end()) -
+        match_array.begin();
+    const int max_vote = static_cast<int>(match_array[max_vote_index]);
 
     STDMatchList match_triangle_list;
     if (max_vote_index >= 0 && max_vote >= 5) 

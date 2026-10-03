@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 
@@ -264,6 +265,22 @@ public:
                   std::pair<Eigen::Vector3d, Eigen::Matrix3d> &loop_transform,
                   std::vector<std::pair<STD, STD>> &loop_std_pair, pcl::PointCloud<pcl::PointXYZINormal>::Ptr pl_cur);
 
+  void SearchLoop(
+      std::vector<STD> &stds_vec,
+      std::pair<int, double> &loop_result,
+      std::pair<Eigen::Vector3d, Eigen::Matrix3d> &loop_transform,
+      std::vector<std::pair<STD, STD>> &loop_std_pair,
+      pcl::PointCloud<pcl::PointXYZINormal>::Ptr pl_cur,
+      const std::unordered_set<int> &allowed_frame_ids);
+
+  // Public for deterministic candidate-policy tests and bounded relocalization.
+  // A null filter means all frames; an empty non-null filter means no frames.
+  void candidate_selector(
+      std::vector<STD> &stds_vec,
+      std::vector<STDMatchList> &candidate_matcher_vec,
+      const std::unordered_set<int> *allowed_frame_ids = nullptr,
+      bool cross_session = false);
+
   // add descriptors to database
   void AddSTDescs(const std::vector<STD> &stds_vec);
 
@@ -308,10 +325,14 @@ private:
   void generate_std(const std::vector<BinaryDescriptor> &binary_list,
                     const int &frame_id, std::vector<STD> &std_list);
 
-  // Select a specified number of candidate frames according to the number of
-  // STDesc rough matches
-  void candidate_selector(std::vector<STD> &stds_vec,
-                          std::vector<STDMatchList> &candidate_matcher_vec);
+  void SearchLoopImpl(
+      std::vector<STD> &stds_vec,
+      std::pair<int, double> &loop_result,
+      std::pair<Eigen::Vector3d, Eigen::Matrix3d> &loop_transform,
+      std::vector<std::pair<STD, STD>> &loop_std_pair,
+      pcl::PointCloud<pcl::PointXYZINormal>::Ptr pl_cur,
+      const std::unordered_set<int> *allowed_frame_ids,
+      bool cross_session);
 
   // Get the best candidate frame by geometry check
   void

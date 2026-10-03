@@ -51,6 +51,7 @@ add_library(voxel_slam_map_io
   src/btc_io.cpp
   src/mapping_capture.cpp
   src/prior_map_tracker.cpp
+  src/relocalizer.cpp
 )
 target_include_directories(voxel_slam_map_io PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
