@@ -6,6 +6,7 @@
 #include <Eigen/Core>
 
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 
@@ -25,6 +26,8 @@ class InitialPoseRequestBuffer {
               std::uint64_t &generation, std::string &error);
   PendingInitialPose snapshot() const;
   bool is_current(std::uint64_t generation) const;
+  bool run_if_current(std::uint64_t generation,
+                      const std::function<void()> &action) const;
 
  private:
   mutable std::mutex mutex_;

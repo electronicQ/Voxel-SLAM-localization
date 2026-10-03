@@ -108,6 +108,14 @@ TEST(DirectPoseInitializer, ReplacesRequestsAndRejectsNonMapFrames) {
   EXPECT_GT(second, first);
   EXPECT_FALSE(buffer.is_current(first));
   EXPECT_TRUE(buffer.is_current(second));
+  bool stale_action_ran = false;
+  EXPECT_FALSE(buffer.run_if_current(first,
+                                     [&]() { stale_action_ran = true; }));
+  EXPECT_FALSE(stale_action_ran);
+  bool current_action_ran = false;
+  EXPECT_TRUE(buffer.run_if_current(second,
+                                    [&]() { current_action_ran = true; }));
+  EXPECT_TRUE(current_action_ran);
   const PendingInitialPose pending = buffer.snapshot();
   EXPECT_TRUE(pending.valid);
   EXPECT_EQ(pending.generation, second);

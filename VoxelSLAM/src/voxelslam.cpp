@@ -869,11 +869,12 @@ public:
       throw std::invalid_argument(
           "map_export_path is only valid in mapping mode");
     }
-    if(local_map_load_radius <= 0.0 ||
-       local_map_unload_radius < local_map_load_radius ||
-       local_map_max_load_per_scan < 0 || local_map_preload_limit <= 0 ||
-       direct_pose_validation_scans <= 0 ||
-       direct_pose_validation_timeout_sec <= 0.0)
+    if(operation_mode == "localization" &&
+       (local_map_load_radius <= 0.0 ||
+        local_map_unload_radius < local_map_load_radius ||
+        local_map_max_load_per_scan < 0 || local_map_preload_limit <= 0 ||
+        direct_pose_validation_scans <= 0 ||
+        direct_pose_validation_timeout_sec <= 0.0))
     {
       ROS_FATAL("Localization map-cache or direct-validation settings are invalid.");
       throw std::invalid_argument("invalid localization settings");
@@ -1176,7 +1177,15 @@ public:
     IMUST correction;
     correction.R = seed.T_W_O.R;
     correction.p = seed.T_W_O.t;
-    if(!apply_frontend_global_correction(correction, error))
+    bool correction_succeeded = false;
+    const bool request_was_current = initial_pose_requests.run_if_current(
+        request.generation, [&]() {
+          correction_succeeded =
+              apply_frontend_global_correction(correction, error);
+        });
+    if(!request_was_current)
+      return 0;
+    if(!correction_succeeded)
     {
       handled_direct_generation = request.generation;
       prior_map_tracker.reset_runtime_cache();

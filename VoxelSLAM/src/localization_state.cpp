@@ -66,6 +66,16 @@ bool InitialPoseRequestBuffer::is_current(std::uint64_t generation) const {
   return pending_.valid && pending_.generation == generation;
 }
 
+bool InitialPoseRequestBuffer::run_if_current(
+    std::uint64_t generation, const std::function<void()> &action) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!pending_.valid || pending_.generation != generation || !action) {
+    return false;
+  }
+  action();
+  return true;
+}
+
 bool make_direct_pose_seed(
     const PendingInitialPose &request, bool imu_ready,
     const Eigen::Matrix3d &R_O_C, const Eigen::Vector3d &p_O_C,
