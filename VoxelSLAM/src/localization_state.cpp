@@ -308,3 +308,24 @@ const char *localization_state_name(LocalizationState state) {
   }
   return "UNKNOWN";
 }
+
+std::uint64_t FrontendSessionEpoch::capture() const {
+  return value_.load();
+}
+
+bool FrontendSessionEpoch::is_current(std::uint64_t captured) const {
+  return value_.load() == captured;
+}
+
+bool FrontendSessionEpoch::advance(std::string &error) {
+  error.clear();
+  std::uint64_t current = value_.load();
+  while (true) {
+    if (current == std::numeric_limits<std::uint64_t>::max()) {
+      return fail(error, "frontend session epoch is exhausted");
+    }
+    if (value_.compare_exchange_weak(current, current + 1U)) {
+      return true;
+    }
+  }
+}

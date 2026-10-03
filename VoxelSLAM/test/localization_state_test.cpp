@@ -112,3 +112,17 @@ TEST(LocalizationStateMachine, RejectsIllegalEventsWithoutChangingState) {
   EXPECT_EQ(machine.state(), LocalizationState::WAITING_FOR_MAP);
   EXPECT_EQ(machine.cleanup_count(), 0U);
 }
+
+TEST(FrontendSessionEpoch, RejectsResultsCapturedBeforeReset) {
+  FrontendSessionEpoch epoch;
+  std::string error;
+
+  const std::uint64_t first_session = epoch.capture();
+  EXPECT_TRUE(epoch.is_current(first_session));
+  ASSERT_TRUE(epoch.advance(error)) << error;
+  EXPECT_FALSE(epoch.is_current(first_session));
+
+  const std::uint64_t second_session = epoch.capture();
+  EXPECT_NE(second_session, first_session);
+  EXPECT_TRUE(epoch.is_current(second_session));
+}

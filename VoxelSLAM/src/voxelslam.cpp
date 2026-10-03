@@ -800,7 +800,7 @@ public:
   vector<int> cnct_map;
   mutex mtx_keyframe;
   PGO_Edges gba_edges1, gba_edges2;
-  bool is_finish = false;
+  std::atomic<bool> is_finish{false};
 
   vector<string> sessionNames;
   string bagname, savepath;
@@ -813,6 +813,7 @@ public:
   mutex frontend_pipeline_mutex;
   mutex localization_state_mutex;
   LocalizationStateMachine localization_machine;
+  FrontendSessionEpoch frontend_session_epoch;
   ros::Publisher pub_localization_state;
   ros::Publisher pub_localization_valid;
   int lost_bad_scan_limit = 5;
@@ -1819,6 +1820,13 @@ public:
 
   void system_reset(deque<sensor_msgs::Imu::Ptr> &imus)
   {
+    string epoch_error;
+    if(!frontend_session_epoch.advance(epoch_error))
+    {
+      ROS_FATAL_STREAM("Cannot reset frontend session: " << epoch_error);
+      ros::shutdown();
+      return;
+    }
     for(auto iter=surf_map.begin(); iter!=surf_map.end(); iter++)
     {
       iter->second->tras_ptr(octos_release);
@@ -2011,8 +2019,10 @@ public:
         loop_update(); last_pos = x_curr.p; jour = 0;
       }
       
-      n.param<bool>("finish", is_finish, false);
-      if(is_finish)
+      bool finish_requested = false;
+      n.param<bool>("finish", finish_requested, false);
+      is_finish.store(finish_requested);
+      if(finish_requested)
       {
         break;
       }
@@ -2070,6 +2080,10 @@ public:
         continue;
       }
 
+      unique_lock<mutex> localization_pipeline_lock;
+      if(operation_mode == "localization")
+        localization_pipeline_lock =
+            unique_lock<mutex>(frontend_pipeline_mutex);
       if(frontend_reset_requested.exchange(false))
       {
         system_reset(imus);
@@ -2077,11 +2091,6 @@ public:
         reset_flag = 1;
         continue;
       }
-
-      unique_lock<mutex> localization_pipeline_lock;
-      if(operation_mode == "localization")
-        localization_pipeline_lock =
-            unique_lock<mutex>(frontend_pipeline_mutex);
       if(lost_recovery_pending)
       {
         handle_localization_event(LocalizationEvent::RECOVERY_STARTED);
@@ -2471,12 +2480,11 @@ public:
 
     while(n.ok())
     {
-      if(reset_flag == 1)
+      if(reset_flag.exchange(0) == 1)
       {
-        reset_flag = 0;
         clear_local_session();
       }
-      if(is_finish && buf_lba2loop.empty()) break;
+      if(is_finish.load()) break;
       const LocalizationState state = localization_state_snapshot();
       if(state == LocalizationState::IN_MAP_TRACKING &&
          (!fusion_window.empty() || !current_odometry.empty()))
@@ -2565,6 +2573,8 @@ public:
       pcl::PointCloud<pcl::PointXYZINormal>::Ptr current_planes =
           query_manager.plane_cloud_vec_.back();
 
+      const std::uint64_t query_session_epoch =
+          frontend_session_epoch.capture();
       if(!handle_localization_event(
              LocalizationEvent::BTC_STARTED).accepted)
         continue;
@@ -2612,6 +2622,17 @@ public:
 
       const RelocalizationResult relocalization = relocalizer.relocalize(
           relocalization_options, score_checked_search, icp_verifier);
+      if(is_finish.load()) break;
+      if(!frontend_session_epoch.is_current(query_session_epoch))
+      {
+        ROS_WARN("Discarded BTC result produced by a reset frontend session.");
+        if(localization_state_snapshot() == LocalizationState::RELOCALIZING ||
+           (localization_state_snapshot() == LocalizationState::ALIGNING &&
+            alignment_source_snapshot() == AlignmentSource::BTC))
+          handle_localization_event(LocalizationEvent::BTC_FAILED);
+        clear_local_session();
+        continue;
+      }
       if(!relocalization.success)
       {
         ROS_WARN_STREAM("BTC relocalization failed: "
@@ -2645,6 +2666,15 @@ public:
       bool correction_succeeded = false;
       {
         lock_guard<mutex> pipeline_lock(frontend_pipeline_mutex);
+        if(!frontend_session_epoch.is_current(query_session_epoch))
+        {
+          ROS_WARN("Discarded BTC alignment produced by a reset frontend session.");
+          if(localization_state_snapshot() == LocalizationState::ALIGNING &&
+             alignment_source_snapshot() == AlignmentSource::BTC)
+            handle_localization_event(LocalizationEvent::BTC_FAILED);
+          clear_local_session();
+          continue;
+        }
         if(localization_state_snapshot() != LocalizationState::ALIGNING ||
            alignment_source_snapshot() != AlignmentSource::BTC)
           continue;
@@ -2846,9 +2876,8 @@ public:
 
     while(n.ok())
     {
-      if(reset_flag == 1)
+      if(reset_flag.exchange(0) == 1)
       {
-        reset_flag = 0;
         scanPoses->insert(scanPoses->end(), buf_lba2loop_tem.begin(), buf_lba2loop_tem.end());
         for(ScanPose *bl: buf_lba2loop_tem) bl->pvec = nullptr;
         buf_lba2loop_tem.clear();
@@ -2879,7 +2908,7 @@ public:
         stepsizes.clear(); stepsizes.push_back(0); stepsizes.push_back(0);
       }
 
-      if(is_finish && buf_lba2loop.empty())
+      if(is_finish.load() && buf_lba2loop.empty())
       {
         break;
       }
@@ -3207,7 +3236,7 @@ public:
       delete std_managers[i];
     malloc_trim(0);
 
-    if(is_finish)
+    if(is_finish.load())
     {
       if(keyframes->empty())
       {
@@ -3231,7 +3260,7 @@ public:
       topDownProcess(initial, graph, ids, stepsizes);
     }
 
-    if(is_finish && operation_mode == "mapping" &&
+    if(is_finish.load() && operation_mode == "mapping" &&
        !map_export_path.empty() && !map_export_capture_failed)
     {
       string export_error;
@@ -3579,6 +3608,9 @@ public:
   // The main thread of bottom up in global mapping
   void thd_globalmapping(ros::NodeHandle &n)
   {
+    // Localization consumes an immutable historical map and never creates GBA
+    // submaps. Do not start the mapping-only polling loop in this mode.
+    if(operation_mode == "localization") return;
     n.param<double>("GBA/voxel_size", gba_voxel_size, 1.0);
     n.param<double>("GBA/min_eigen_value", gba_min_eigen_value, 0.01);
     n.param<vector<double>>("GBA/eigen_value_array", gba_eigen_value_array, vector<double>());
@@ -3664,7 +3696,7 @@ public:
         gba_edges2.edges.clear(); gba_edges2.mates.clear();
         HBA_add_edge(xs, gba_submaps, gba_edges2, cnct_map, total_max_iter, thread_num);
 
-        if(is_finish)
+        if(is_finish.load())
         {
           for(int i=0; i<gba_submaps.size(); i++)
             delete gba_submaps[i];

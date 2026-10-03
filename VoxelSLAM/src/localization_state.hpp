@@ -5,6 +5,7 @@
 
 #include <Eigen/Core>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -106,3 +107,16 @@ class LocalizationStateMachine {
 };
 
 const char *localization_state_name(LocalizationState state);
+
+// A BTC query captures the current epoch before doing expensive descriptor,
+// ICP, and graph work. Any frontend reset advances the epoch, making an
+// in-flight result stale and therefore ineligible for commit.
+class FrontendSessionEpoch {
+ public:
+  std::uint64_t capture() const;
+  bool is_current(std::uint64_t captured) const;
+  bool advance(std::string &error);
+
+ private:
+  std::atomic<std::uint64_t> value_{0};
+};
