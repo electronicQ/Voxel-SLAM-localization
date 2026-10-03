@@ -40,6 +40,7 @@ TEST(DirectPoseInitializer, UsesRvizXyYawImuRollPitchAndNearestMapHeight) {
   ASSERT_TRUE(tracker.initialize(map, error)) << error;
 
   PendingInitialPose request;
+  request.valid = true;
   request.generation = 3;
   request.stamp_sec = 123.0;
   request.xy = Eigen::Vector2d(9.8, 20.2);
@@ -69,6 +70,7 @@ TEST(DirectPoseInitializer, RejectsMissingImuAndInvalidInputsAtomically) {
   std::string error;
   ASSERT_TRUE(tracker.initialize(map, error)) << error;
   PendingInitialPose request;
+  request.valid = true;
   request.generation = 1;
   request.xy = Eigen::Vector2d::Zero();
   DirectPoseSeed sentinel;

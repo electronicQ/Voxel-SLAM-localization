@@ -15,9 +15,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14 -pthread -std=c++0x -std=c++14 -fexceptions")
 
 find_package(catkin REQUIRED COMPONENTS
+  geometry_msgs
+  nav_msgs
   roscpp
   rospy
+  sensor_msgs
   std_msgs
+  tf
   pcl_conversions
   pcl_ros
   livox_ros_driver
@@ -31,7 +35,7 @@ find_package(Boost REQUIRED COMPONENTS filesystem system)
 
 catkin_package(
   LIBRARIES voxel_slam_map_io
-  CATKIN_DEPENDS geometry_msgs nav_msgs roscpp rospy std_msgs 
+  CATKIN_DEPENDS geometry_msgs nav_msgs roscpp rospy sensor_msgs std_msgs tf
   DEPENDS EIGEN3 PCL GTSAM Boost
   INCLUDE_DIRS
 )
@@ -54,6 +58,7 @@ add_library(voxel_slam_map_io
   src/relocalizer.cpp
   src/session_aligner.cpp
   src/global_correction.cpp
+  src/localization_state.cpp
 )
 target_include_directories(voxel_slam_map_io PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

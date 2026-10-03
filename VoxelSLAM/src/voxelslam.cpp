@@ -1,8 +1,12 @@
 #include "voxelslam.hpp"
 #include "global_correction.hpp"
+#include "localization_state.hpp"
 #include "mapping_capture.hpp"
 #include "prior_map_tracker.hpp"
 
+#include <geometry_msgs/PoseWithCovarianceStamped.h>
+
+#include <atomic>
 #include <cstdint>
 #include <limits>
 #include <new>
@@ -794,16 +798,27 @@ public:
 
   vector<string> sessionNames;
   string bagname, savepath;
-  string operation_mode, map_export_path;
+  string operation_mode, map_export_path, localization_map_path;
   SavedMap localization_map;
   PriorMapTracker prior_map_tracker;
-  bool prior_map_ready = false;
-  bool localization_valid = false;
+  std::atomic<bool> prior_map_ready{false};
+  std::atomic<bool> localization_valid{false};
   double local_map_load_radius = 30.0;
   double local_map_unload_radius = 40.0;
   int local_map_max_load_per_scan = 1;
   int local_map_preload_limit = 20;
   TrackingQuality last_tracking_quality;
+  ros::Subscriber sub_initialpose;
+  InitialPoseRequestBuffer initial_pose_requests;
+  bool rviz_initialpose_enabled = true;
+  bool imu_orientation_ready = false;
+  bool direct_validation_active = false;
+  std::uint64_t active_direct_generation = 0;
+  std::uint64_t handled_direct_generation = 0;
+  int direct_validation_streak = 0;
+  int direct_pose_validation_scans = 3;
+  double direct_pose_validation_timeout_sec = 5.0;
+  double direct_validation_started_sec = 0.0;
   int is_save_map;
 
   VOXEL_SLAM(ros::NodeHandle &n)
@@ -820,6 +835,7 @@ public:
     n.param<string>("General/save_path", savepath, "");
     n.param<string>("General/mode", operation_mode, "mapping");
     n.param<string>("General/map_export_path", map_export_path, "");
+    n.param<string>("Localization/map_path", localization_map_path, "");
     n.param<double>("Localization/local_map_load_radius",
                     local_map_load_radius, 30.0);
     n.param<double>("Localization/local_map_unload_radius",
@@ -828,6 +844,12 @@ public:
                  local_map_max_load_per_scan, 1);
     n.param<int>("Localization/local_map_preload_limit",
                  local_map_preload_limit, 20);
+    n.param<bool>("Localization/rviz_initialpose_enabled",
+                  rviz_initialpose_enabled, true);
+    n.param<int>("Localization/direct_pose_validation_scans",
+                 direct_pose_validation_scans, 3);
+    n.param<double>("Localization/direct_pose_validation_timeout_sec",
+                    direct_pose_validation_timeout_sec, 5.0);
     n.param<int>("General/lidar_type", feat.lidar_type, 0);
     n.param<double>("General/blind", feat.blind, 0.1);
     n.param<int>("General/point_filter_num", feat.point_filter_num, 3);
@@ -847,12 +869,24 @@ public:
       throw std::invalid_argument(
           "map_export_path is only valid in mapping mode");
     }
+    if(local_map_load_radius <= 0.0 ||
+       local_map_unload_radius < local_map_load_radius ||
+       local_map_max_load_per_scan < 0 || local_map_preload_limit <= 0 ||
+       direct_pose_validation_scans <= 0 ||
+       direct_pose_validation_timeout_sec <= 0.0)
+    {
+      ROS_FATAL("Localization map-cache or direct-validation settings are invalid.");
+      throw std::invalid_argument("invalid localization settings");
+    }
 
     sub_imu = n.subscribe(imu_topic, 80000, imu_handler);
     if(feat.lidar_type == LIVOX)
       sub_pcl = n.subscribe<livox_ros_driver::CustomMsg>(lid_topic, 1000, pcl_handler);
     else
       sub_pcl = n.subscribe<sensor_msgs::PointCloud2>(lid_topic, 1000, pcl_handler);
+    if(operation_mode == "localization" && rviz_initialpose_enabled)
+      sub_initialpose = n.subscribe(
+          "/initialpose", 5, &VOXEL_SLAM::initialpose_callback, this);
     odom_ekf.imu_topic = imu_topic;
 
     n.param<double>("Odometry/cov_gyr", cov_gyr, 0.1);
@@ -920,6 +954,37 @@ public:
 
     sws.resize(thread_num);
     cout << "bagname: " << bagname << endl;
+  }
+
+  void initialpose_callback(
+      const geometry_msgs::PoseWithCovarianceStamped::ConstPtr &message)
+  {
+    if(!rviz_initialpose_enabled || !message) return;
+    const geometry_msgs::Quaternion &orientation =
+        message->pose.pose.orientation;
+    Eigen::Quaterniond quaternion(orientation.w, orientation.x,
+                                  orientation.y, orientation.z);
+    if(!quaternion.coeffs().array().isFinite().all() ||
+       quaternion.norm() < 1e-12)
+    {
+      ROS_WARN("Rejected RViz initial pose with an invalid quaternion.");
+      return;
+    }
+    quaternion.normalize();
+    const Eigen::Matrix3d rotation = quaternion.toRotationMatrix();
+    const double yaw = std::atan2(rotation(1, 0), rotation(0, 0));
+    const Eigen::Vector2d xy(message->pose.pose.position.x,
+                             message->pose.pose.position.y);
+    std::uint64_t generation = 0;
+    string error;
+    if(!initial_pose_requests.submit(message->header.frame_id,
+                                     message->header.stamp.toSec(), xy, yaw,
+                                     generation, error))
+    {
+      ROS_WARN_STREAM("Rejected RViz initial pose: " << error);
+      return;
+    }
+    ROS_INFO_STREAM("Captured RViz initial pose generation " << generation);
   }
 
   void release_voxel_map(unordered_map<VOXEL_LOC, OctoTree*> &map)
@@ -1019,6 +1084,115 @@ public:
     if(update.loaded_ids.empty() && update.unloaded_ids.empty())
       return true;
     return install_historical_cache(update, error);
+  }
+
+  bool apply_frontend_global_correction(const IMUST &correction,
+                                        string &error)
+  {
+    error.clear();
+    lock_guard<mutex> state_lock(mtx_loop);
+    if(global_correction_generation ==
+       numeric_limits<std::uint64_t>::max())
+    {
+      error = "global correction generation is exhausted";
+      return false;
+    }
+    if(win_count <= 0 || static_cast<size_t>(win_count) > x_buf.size())
+    {
+      error = "global correction found an invalid frontend window";
+      return false;
+    }
+
+    CorrectionTargets targets;
+    targets.current_state = toCorrectionState(x_curr);
+    targets.rotate_gravity = (g_update == 1);
+    targets.has_applied_generation = has_global_correction_generation;
+    targets.last_applied_generation = global_correction_generation;
+    targets.window_states.reserve(win_count);
+    for(int i=0; i<win_count; ++i)
+      targets.window_states.push_back(toCorrectionState(x_buf[i]));
+    targets.cached_states.reserve(buf_lba2loop.size());
+    for(ScanPose *pose: buf_lba2loop)
+    {
+      if(pose == nullptr)
+      {
+        error = "global correction found a null cached pose";
+        return false;
+      }
+      targets.cached_states.push_back(toCorrectionState(pose->x));
+    }
+
+    const std::uint64_t next_generation = global_correction_generation + 1;
+    if(!apply_global_correction_once(correction, next_generation, targets,
+                                     error))
+      return false;
+
+    updateFromCorrectionState(targets.current_state, x_curr);
+    for(int i=0; i<win_count; ++i)
+      updateFromCorrectionState(targets.window_states[i], x_buf[i]);
+    size_t cached_index = 0;
+    for(ScanPose *pose: buf_lba2loop)
+    {
+      updateFromCorrectionState(targets.cached_states[cached_index], pose->x);
+      ++cached_index;
+    }
+    has_global_correction_generation = true;
+    global_correction_generation = targets.last_applied_generation;
+    return true;
+  }
+
+  // Returns 1 when a newer request starts validation, 0 when there is no
+  // actionable request yet, and -1 after a hard failure requiring LIO reset.
+  int try_start_direct_pose_validation(double now_sec, string &error)
+  {
+    error.clear();
+    if(!rviz_initialpose_enabled || !prior_map_ready.load() ||
+       !imu_orientation_ready)
+      return 0;
+
+    const PendingInitialPose request = initial_pose_requests.snapshot();
+    if(!request.valid || request.generation == handled_direct_generation ||
+       request.generation == active_direct_generation)
+      return 0;
+
+    DirectPoseSeed seed;
+    if(!make_direct_pose_seed(request, true, x_curr.R, x_curr.p,
+                              prior_map_tracker, seed, error))
+    {
+      handled_direct_generation = request.generation;
+      return -1;
+    }
+    if(!initial_pose_requests.is_current(request.generation))
+      return 0;
+
+    if(!rebuild_historical_local_map(seed.T_W_C.t, error))
+    {
+      handled_direct_generation = request.generation;
+      return -1;
+    }
+    if(!initial_pose_requests.is_current(request.generation))
+      return 0;
+
+    IMUST correction;
+    correction.R = seed.T_W_O.R;
+    correction.p = seed.T_W_O.t;
+    if(!apply_frontend_global_correction(correction, error))
+    {
+      handled_direct_generation = request.generation;
+      prior_map_tracker.reset_runtime_cache();
+      return -1;
+    }
+
+    localization_valid.store(false);
+    direct_validation_active = true;
+    active_direct_generation = request.generation;
+    handled_direct_generation = request.generation;
+    direct_validation_streak = 0;
+    direct_validation_started_sec = now_sec;
+    ROS_INFO_STREAM("Started direct-pose validation for RViz generation "
+                    << request.generation << " using height keyframe "
+                    << seed.height_keyframe_id);
+    return 1;
   }
 
   // The point-to-plane alignment for odometry
@@ -1300,63 +1474,12 @@ public:
     printf("loop update: %zu\n", sws[0].size());
     double t1 = ros::Time::now().toSec();
 
+    string correction_error;
+    if(!apply_frontend_global_correction(dx, correction_error))
     {
-      lock_guard<mutex> state_lock(mtx_loop);
-      if (global_correction_generation ==
-          numeric_limits<std::uint64_t>::max()) {
-        ROS_ERROR("global correction generation is exhausted");
-        loop_detect = 0;
-        return;
-      }
-      if (win_count <= 0 ||
-          static_cast<size_t>(win_count) > x_buf.size()) {
-        ROS_ERROR("global correction found an invalid frontend window");
-        loop_detect = 0;
-        return;
-      }
-
-      CorrectionTargets targets;
-      targets.current_state = toCorrectionState(x_curr);
-      targets.rotate_gravity = (g_update == 1);
-      targets.has_applied_generation = has_global_correction_generation;
-      targets.last_applied_generation = global_correction_generation;
-      targets.window_states.reserve(win_count);
-      for (int i = 0; i < win_count; ++i) {
-        targets.window_states.push_back(toCorrectionState(x_buf[i]));
-      }
-      targets.cached_states.reserve(buf_lba2loop.size());
-      for (ScanPose *pose : buf_lba2loop) {
-        if (pose == nullptr) {
-          ROS_ERROR("global correction found a null cached pose");
-          loop_detect = 0;
-          return;
-        }
-        targets.cached_states.push_back(toCorrectionState(pose->x));
-      }
-
-      string correction_error;
-      const std::uint64_t next_generation =
-          global_correction_generation + 1;
-      if (!apply_global_correction_once(dx, next_generation, targets,
-                                        correction_error)) {
-        ROS_ERROR("global correction rejected: %s",
-                  correction_error.c_str());
-        loop_detect = 0;
-        return;
-      }
-
-      updateFromCorrectionState(targets.current_state, x_curr);
-      for (int i = 0; i < win_count; ++i) {
-        updateFromCorrectionState(targets.window_states[i], x_buf[i]);
-      }
-      size_t cached_index = 0;
-      for (ScanPose *pose : buf_lba2loop) {
-        updateFromCorrectionState(targets.cached_states[cached_index],
-                                  pose->x);
-        ++cached_index;
-      }
-      has_global_correction_generation = true;
-      global_correction_generation = targets.last_applied_generation;
+      ROS_ERROR("global correction rejected: %s", correction_error.c_str());
+      loop_detect = 0;
+      return;
     }
 
     for(auto iter=surf_map.begin(); iter!=surf_map.end(); iter++)
@@ -1553,6 +1676,7 @@ public:
     odom_ekf.init_num = 0;
     odom_ekf.IMU_init(imus);
     x_curr.g = -odom_ekf.mean_acc * imupre_scale_gravity;
+    imu_orientation_ready = false;
 
     for(int i=0; i<imu_pre_buf.size(); i++)
       delete imu_pre_buf[i];
@@ -1808,6 +1932,7 @@ public:
         if(init == 1)
         {
           motion_init_flag = 0;
+          imu_orientation_ready = true;
         }
         else
         {
@@ -1820,6 +1945,22 @@ public:
       {
         if(odom_ekf.process(x_curr, *pcl_curr, imus) == 0)
           continue;
+
+        string direct_pose_error;
+        const int direct_start = try_start_direct_pose_validation(
+            ros::Time::now().toSec(), direct_pose_error);
+        if(direct_start < 0)
+        {
+          ROS_WARN_STREAM("Direct-pose initialization failed: "
+                          << direct_pose_error);
+          localization_valid.store(false);
+          direct_validation_active = false;
+          active_direct_generation = 0;
+          prior_map_tracker.reset_runtime_cache();
+          system_reset(imus);
+          motion_init_flag = 1;
+          continue;
+        }
 
         pcl::PointCloud<PointType> pl_down = *pcl_curr;
         down_sampling_voxel(pl_down, down_size);
@@ -1834,8 +1975,9 @@ public:
         var_init(extrin_para, pl_down, pptr, dept_err, beam_err);
 
         TrackingQuality scan_quality;
-        if(operation_mode == "localization" && localization_valid &&
-           prior_map_ready)
+        if(operation_mode == "localization" &&
+           (localization_valid.load() || direct_validation_active) &&
+           prior_map_ready.load())
         {
           string cache_error;
           bool tracking_good = false;
@@ -1856,6 +1998,36 @@ public:
           else
           {
             degrade_cnt++;
+          }
+
+          if(direct_validation_active)
+          {
+            if(tracking_good)
+              direct_validation_streak++;
+            else
+              direct_validation_streak = 0;
+
+            if(direct_validation_streak >= direct_pose_validation_scans)
+            {
+              localization_valid.store(true);
+              direct_validation_active = false;
+              ROS_INFO_STREAM(
+                  "RViz direct pose validated after "
+                  << direct_validation_streak << " consecutive scans.");
+            }
+            else if(ros::Time::now().toSec() -
+                        direct_validation_started_sec >
+                    direct_pose_validation_timeout_sec)
+            {
+              ROS_WARN("RViz direct-pose validation timed out; resetting temporary LIO.");
+              localization_valid.store(false);
+              direct_validation_active = false;
+              active_direct_generation = 0;
+              prior_map_tracker.reset_runtime_cache();
+              system_reset(imus);
+              motion_init_flag = 1;
+              continue;
+            }
           }
 
           pwld.clear();
@@ -2110,6 +2282,38 @@ public:
     n.param<int>("Loop/isHighFly", isHighFly, 0);
     ConfigSetting config_setting;
     read_parameters(n, config_setting, isHighFly);
+
+    if(operation_mode == "localization")
+    {
+      if(localization_map_path.empty())
+      {
+        ROS_FATAL("Localization/map_path must be set in localization mode.");
+        ros::shutdown();
+        return;
+      }
+      MapPackageOptions load_options;
+      load_options.win_size = win_size;
+      load_options.keyframe_distance_m = 0.1;
+      load_options.keyframe_angle_deg = 5.0;
+      load_options.keyframe_voxel_size = voxel_size / 10.0;
+      load_options.btc_config = config_setting;
+      string map_error;
+      if(!MapPackageIO::load(localization_map_path, localization_map,
+                             load_options, map_error) ||
+         !prior_map_tracker.initialize(localization_map, map_error))
+      {
+        ROS_FATAL_STREAM("Failed to load localization map package: "
+                         << map_error);
+        ros::shutdown();
+        return;
+      }
+      prior_map_ready.store(true);
+      ROS_INFO_STREAM("Loaded localization map package with "
+                      << localization_map.keyframes.size()
+                      << " keyframes and "
+                      << localization_map.btc_frames.size()
+                      << " BTC frames.");
+    }
 
     vector<double> juds;
     FileReaderWriter::instance().previous_map_names(n, sessionNames, juds);
