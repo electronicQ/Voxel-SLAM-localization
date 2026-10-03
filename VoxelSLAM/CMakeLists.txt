@@ -170,6 +170,17 @@ if(CATKIN_ENABLE_TESTING)
       ${PCL_LIBRARIES}
     )
   endif()
+
+  catkin_add_gtest(direct_pose_initializer_test
+    test/direct_pose_initializer_test.cpp
+  )
+  if(TARGET direct_pose_initializer_test)
+    target_link_libraries(direct_pose_initializer_test
+      voxel_slam_map_io
+      ${catkin_LIBRARIES}
+      ${PCL_LIBRARIES}
+    )
+  endif()
 endif()
 
 
