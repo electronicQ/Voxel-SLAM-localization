@@ -112,6 +112,17 @@ if(CATKIN_ENABLE_TESTING)
       ${PCL_LIBRARIES}
     )
   endif()
+
+  catkin_add_gtest(btc_candidate_filter_test
+    test/btc_candidate_filter_test.cpp
+  )
+  if(TARGET btc_candidate_filter_test)
+    target_link_libraries(btc_candidate_filter_test
+      voxel_slam_map_io
+      ${catkin_LIBRARIES}
+      ${PCL_LIBRARIES}
+    )
+  endif()
 endif()
 
 
