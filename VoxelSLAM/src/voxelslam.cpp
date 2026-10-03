@@ -1,6 +1,7 @@
 #include "voxelslam.hpp"
 #include "global_correction.hpp"
 #include "mapping_capture.hpp"
+#include "prior_map_tracker.hpp"
 
 #include <cstdint>
 #include <limits>
@@ -794,6 +795,15 @@ public:
   vector<string> sessionNames;
   string bagname, savepath;
   string operation_mode, map_export_path;
+  SavedMap localization_map;
+  PriorMapTracker prior_map_tracker;
+  bool prior_map_ready = false;
+  bool localization_valid = false;
+  double local_map_load_radius = 30.0;
+  double local_map_unload_radius = 40.0;
+  int local_map_max_load_per_scan = 1;
+  int local_map_preload_limit = 20;
+  TrackingQuality last_tracking_quality;
   int is_save_map;
 
   VOXEL_SLAM(ros::NodeHandle &n)
@@ -810,6 +820,14 @@ public:
     n.param<string>("General/save_path", savepath, "");
     n.param<string>("General/mode", operation_mode, "mapping");
     n.param<string>("General/map_export_path", map_export_path, "");
+    n.param<double>("Localization/local_map_load_radius",
+                    local_map_load_radius, 30.0);
+    n.param<double>("Localization/local_map_unload_radius",
+                    local_map_unload_radius, 40.0);
+    n.param<int>("Localization/local_map_max_load_per_scan",
+                 local_map_max_load_per_scan, 1);
+    n.param<int>("Localization/local_map_preload_limit",
+                 local_map_preload_limit, 20);
     n.param<int>("General/lidar_type", feat.lidar_type, 0);
     n.param<double>("General/blind", feat.blind, 0.1);
     n.param<int>("General/point_filter_num", feat.point_filter_num, 3);
@@ -904,9 +922,109 @@ public:
     cout << "bagname: " << bagname << endl;
   }
 
-  // The point-to-plane alignment for odometry
-  bool lio_state_estimation(PVecPtr pptr)
+  void release_voxel_map(unordered_map<VOXEL_LOC, OctoTree*> &map)
   {
+    vector<OctoTree*> descendants;
+    for(auto &entry: map)
+    {
+      if(entry.second == nullptr) continue;
+      entry.second->clear_slwd(sws[0]);
+      entry.second->tras_ptr(descendants);
+      delete entry.second;
+      entry.second = nullptr;
+    }
+    for(OctoTree *node: descendants)
+      delete node;
+    map.clear();
+  }
+
+  bool install_historical_cache(const PriorMapCacheUpdate &update,
+                                string &error)
+  {
+    error.clear();
+    if(!update.world_cloud || update.world_cloud->empty())
+    {
+      error = "historical local-map cache is empty";
+      return false;
+    }
+
+    unordered_map<VOXEL_LOC, OctoTree*> candidate_map;
+    try
+    {
+      PVec points;
+      points.reserve(update.world_cloud->size());
+      for(const PointType &point: update.world_cloud->points)
+      {
+        pointVar value;
+        value.pnt << point.x, point.y, point.z;
+        value.var = Eigen::Vector3d(point.normal_x, point.normal_y,
+                                    point.normal_z).asDiagonal();
+        if(!value.pnt.array().isFinite().all() ||
+           !value.var.array().isFinite().all())
+        {
+          error = "historical local-map cache contains a non-finite point";
+          release_voxel_map(candidate_map);
+          return false;
+        }
+        points.push_back(value);
+      }
+
+      cut_voxel(candidate_map, points, win_size, 0.0);
+      for(auto &entry: candidate_map)
+      {
+        if(entry.second != nullptr)
+          entry.second->finalize_fixed();
+      }
+
+      surf_map_slide.clear();
+      surf_map.swap(candidate_map);
+      release_voxel_map(candidate_map);
+      return true;
+    }
+    catch(const std::bad_alloc &)
+    {
+      error = "out of memory while building the historical local map";
+    }
+    catch(const std::exception &exception)
+    {
+      error = string("failed to build the historical local map: ") +
+              exception.what();
+    }
+    catch(...)
+    {
+      error = "unknown failure while building the historical local map";
+    }
+    release_voxel_map(candidate_map);
+    return false;
+  }
+
+  bool rebuild_historical_local_map(const Eigen::Vector3d &center,
+                                    string &error)
+  {
+    PriorMapCacheUpdate update;
+    if(!prior_map_tracker.rebuild_local_map(
+           center, local_map_load_radius, local_map_preload_limit,
+           update, error))
+      return false;
+    return install_historical_cache(update, error);
+  }
+
+  bool update_historical_local_map(string &error)
+  {
+    PriorMapCacheUpdate update;
+    if(!prior_map_tracker.update_loaded_keyframes(
+           x_curr.p, local_map_load_radius, local_map_unload_radius,
+           local_map_max_load_per_scan, update, error))
+      return false;
+    if(update.loaded_ids.empty() && update.unloaded_ids.empty())
+      return true;
+    return install_historical_cache(update, error);
+  }
+
+  // The point-to-plane alignment for odometry
+  bool lio_state_estimation(PVecPtr pptr, TrackingQuality *quality = nullptr)
+  {
+    TrackingQuality candidate_quality;
     IMUST x_prop = x_curr;
 
     const int num_max_iter = 4;
@@ -915,6 +1033,8 @@ public:
     G.setZero(); H_T_H.setZero(); I_STATE.setIdentity();
     int rematch_num = 0;
     int match_num = 0;
+    double absolute_residual_sum = 0.0;
+    bool solve_succeeded = true;
 
     int psize = pptr->size();
     vector<OctoTree*> octos;
@@ -929,6 +1049,7 @@ public:
       Eigen::Matrix3d rot_var = x_curr.cov.block<3, 3>(0, 0);
       Eigen::Matrix3d tsl_var = x_curr.cov.block<3, 3>(3, 3);
       match_num = 0;
+      absolute_residual_sum = 0.0;
       nnt.setZero();
 
       for(int i=0; i<psize; i++)
@@ -957,6 +1078,7 @@ public:
           Plane &pp = *pla;
           double R_inv = 1.0 / (0.0005 + sigma_d);
           double resi = pp.normal.dot(wld - pp.center);
+          absolute_residual_sum += std::abs(resi);
 
           Eigen::Matrix<double, 6, 1> jac;
           jac.head(3) = phat * x_curr.R.transpose() * pp.normal;
@@ -974,6 +1096,13 @@ public:
       G.block<DIM, 6>(0, 0) = K_1.block<DIM, 6>(0, 0) * HTH;
       Eigen::Matrix<double, DIM, 1> vec = x_prop - x_curr;
       Eigen::Matrix<double, DIM, 1> solution = K_1.block<DIM, 6>(0, 0) * HTz + vec - G.block<DIM, 6>(0, 0) * vec.block<6, 1>(0, 0);
+
+      if(!K_1.array().isFinite().all() ||
+         !solution.array().isFinite().all())
+      {
+        solve_succeeded = false;
+        break;
+      }
 
       x_curr += solution;
       Eigen::Vector3d rot_add = solution.block<3, 1>(0, 0);
@@ -1002,11 +1131,27 @@ public:
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> saes(nnt);
     Eigen::Vector3d evalue = saes.eigenvalues();
     // printf("eva %d: %lf\n", match_num, evalue[0]);
+    candidate_quality.matched_points = match_num;
+    candidate_quality.mean_abs_point_plane =
+        match_num > 0
+            ? absolute_residual_sum / static_cast<double>(match_num)
+            : std::numeric_limits<double>::infinity();
+    candidate_quality.min_normal_eigenvalue = evalue[0];
+    candidate_quality.finite =
+        x_curr.R.array().isFinite().all() &&
+        x_curr.p.array().isFinite().all() &&
+        x_curr.v.array().isFinite().all() &&
+        x_curr.cov.array().isFinite().all() &&
+        std::isfinite(candidate_quality.mean_abs_point_plane) &&
+        std::isfinite(candidate_quality.min_normal_eigenvalue);
+    candidate_quality.solve_succeeded =
+        solve_succeeded && match_num > 0;
+    if(quality != nullptr)
+      *quality = candidate_quality;
 
-    if(evalue[0] < 14)
-      return false;
-    else
-      return true;
+    return candidate_quality.solve_succeeded &&
+           candidate_quality.finite &&
+           candidate_quality.min_normal_eigenvalue >= 14.0;
   }
 
   // The point-to-plane alignment for initialization
@@ -1688,12 +1833,48 @@ public:
         PVecPtr pptr(new PVec);
         var_init(extrin_para, pl_down, pptr, dept_err, beam_err);
 
-        if(lio_state_estimation(pptr))
+        TrackingQuality scan_quality;
+        if(operation_mode == "localization" && localization_valid &&
+           prior_map_ready)
+        {
+          string cache_error;
+          bool tracking_good = false;
+          if(update_historical_local_map(cache_error))
+          {
+            tracking_good = lio_state_estimation(pptr, &scan_quality);
+          }
+          else
+          {
+            ROS_WARN_STREAM_THROTTLE(
+                1.0, "Historical local-map update failed: " << cache_error);
+          }
+          last_tracking_quality = scan_quality;
+          if(tracking_good)
+          {
+            if(degrade_cnt > 0) degrade_cnt--;
+          }
+          else
+          {
+            degrade_cnt++;
+          }
+
+          pwld.clear();
+          pvec_update(pptr, x_curr, pwld);
+          ResultOutput::instance().pub_localtraj(
+              pwld, jour, x_curr, sessionNames.size()-1, pcl_path);
+
+          // Historical localization is read-only: the current scan is never
+          // inserted into surf_map or any sliding-window map.
+          continue;
+        }
+
+        if(lio_state_estimation(pptr, &scan_quality))
         {
           if(degrade_cnt > 0) degrade_cnt--;
         }
         else
           degrade_cnt++;
+        last_tracking_quality = scan_quality;
 
         pwld.clear();
         pvec_update(pptr, x_curr, pwld);

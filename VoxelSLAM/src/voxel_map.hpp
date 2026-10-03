@@ -1145,6 +1145,51 @@ public:
     plane.radius = eig_value[2];
   }
 
+  // Finalize a read-only fixed-point octree before the first tracking query.
+  // Unlike recut(), this path does not require a sliding-window allocation.
+  void finalize_fixed()
+  {
+    if(octo_state == 1)
+    {
+      for(int i=0; i<8; i++)
+        if(leaves[i] != nullptr)
+          leaves[i]->finalize_fixed();
+      return;
+    }
+
+    opt_state = -1;
+    if(pcr_add.N <= min_point[layer])
+    {
+      plane.is_plane = false;
+      return;
+    }
+
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> saes(pcr_add.cov());
+    eig_value = saes.eigenvalues();
+    eig_vector = saes.eigenvectors();
+    plane.is_plane = plane_judge(eig_value);
+    if(plane.is_plane)
+    {
+      plane_update();
+      last_num = pcr_add.N;
+      PVec().swap(point_fix);
+      return;
+    }
+    if(layer >= max_layer)
+    {
+      PVec().swap(point_fix);
+      return;
+    }
+
+    vector<SlideWindow*> unused_windows;
+    fix_divide(unused_windows);
+    PVec().swap(point_fix);
+    octo_state = 1;
+    for(int i=0; i<8; i++)
+      if(leaves[i] != nullptr)
+        leaves[i]->finalize_fixed();
+  }
+
   void recut(int win_count, vector<IMUST> &x_buf, vector<SlideWindow*> &sws)
   {
     if(octo_state == 0)
