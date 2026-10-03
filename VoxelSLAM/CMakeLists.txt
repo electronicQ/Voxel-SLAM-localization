@@ -186,6 +186,16 @@ if(CATKIN_ENABLE_TESTING)
       ${PCL_LIBRARIES}
     )
   endif()
+
+  catkin_add_gtest(localization_state_test
+    test/localization_state_test.cpp
+  )
+  if(TARGET localization_state_test)
+    target_link_libraries(localization_state_test
+      voxel_slam_map_io
+      ${catkin_LIBRARIES}
+    )
+  endif()
 endif()
 
 
