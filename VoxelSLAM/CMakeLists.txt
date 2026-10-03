@@ -124,6 +124,17 @@ if(CATKIN_ENABLE_TESTING)
       ${PCL_LIBRARIES}
     )
   endif()
+
+  catkin_add_gtest(relocalizer_transform_test
+    test/relocalizer_transform_test.cpp
+  )
+  if(TARGET relocalizer_transform_test)
+    target_link_libraries(relocalizer_transform_test
+      voxel_slam_map_io
+      ${catkin_LIBRARIES}
+      ${PCL_LIBRARIES}
+    )
+  endif()
 endif()
 
 

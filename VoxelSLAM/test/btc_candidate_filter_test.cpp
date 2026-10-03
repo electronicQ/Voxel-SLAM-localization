@@ -103,6 +103,19 @@ TEST(BtcCandidateFilter, CrossSessionBypassesTemporalSkipOnlyWhenRequested) {
   EXPECT_EQ(candidates[1].match_id_.second, 1);
 }
 
+TEST(BtcCandidateFilter, IgnoresNegativeAndOutOfRangeHistoryFrameIds) {
+  STDescManager manager = makeManager();
+  manager.AddSTDescs({descriptor(10.2, -1), descriptor(10.2, 99)});
+  std::vector<STD> queries = makeQueries();
+  std::vector<STDMatchList> candidates;
+
+  manager.candidate_selector(queries, candidates, nullptr, true);
+
+  ASSERT_EQ(candidates.size(), 2U);
+  EXPECT_EQ(candidates[0].match_id_.second, 0);
+  EXPECT_EQ(candidates[1].match_id_.second, 1);
+}
+
 TEST(BtcRadiusPolicy, DoublesAndClampsWithoutRepeatingMaximum) {
   EXPECT_DOUBLE_EQ(next_btc_radius(30.0, 100.0), 60.0);
   EXPECT_DOUBLE_EQ(next_btc_radius(60.0, 100.0), 100.0);
