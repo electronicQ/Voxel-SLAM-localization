@@ -148,6 +148,16 @@ if(CATKIN_ENABLE_TESTING)
       gtsam
     )
   endif()
+
+  catkin_add_gtest(global_correction_test
+    test/global_correction_test.cpp
+  )
+  if(TARGET global_correction_test)
+    target_link_libraries(global_correction_test
+      voxel_slam_map_io
+      ${catkin_LIBRARIES}
+    )
+  endif()
 endif()
 
 
