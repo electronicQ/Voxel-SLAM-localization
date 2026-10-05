@@ -1,12 +1,17 @@
 #pragma once
 
 #include <Eigen/Core>
+#include <Eigen/StdVector>
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
+
+constexpr std::uint32_t kInvalidSpatialIndex =
+    std::numeric_limits<std::uint32_t>::max();
 
 struct BlockIndex {
   std::int64_t x = 0;
@@ -65,6 +70,58 @@ struct SpatialMapConfig {
   bool save_display_cloud = false;
 
   bool validate(std::string &error) const;
+};
+
+struct SpatialMapPoint {
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+  Eigen::Vector3d position = Eigen::Vector3d::Zero();
+  Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
+  float intensity = 0.0F;
+};
+
+using SpatialMapPointVector =
+    std::vector<SpatialMapPoint, Eigen::aligned_allocator<SpatialMapPoint>>;
+
+struct StaticPlane {
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+  Eigen::Vector3d center = Eigen::Vector3d::Zero();
+  Eigen::Vector3d normal = Eigen::Vector3d::Zero();
+  Eigen::Matrix<double, 6, 6> covariance =
+      Eigen::Matrix<double, 6, 6>::Zero();
+  double radius = 0.0;
+};
+
+struct StaticOctreeNode {
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+  Eigen::Vector3d center = Eigen::Vector3d::Zero();
+  double half_length = 0.0;
+  std::array<std::uint32_t, 8> children{{
+      kInvalidSpatialIndex, kInvalidSpatialIndex,
+      kInvalidSpatialIndex, kInvalidSpatialIndex,
+      kInvalidSpatialIndex, kInvalidSpatialIndex,
+      kInvalidSpatialIndex, kInvalidSpatialIndex}};
+  std::uint32_t plane_index = kInvalidSpatialIndex;
+};
+
+struct RootVoxelRecord {
+  RootVoxelIndex index;
+  std::uint32_t root_node_index = kInvalidSpatialIndex;
+};
+
+struct StaticMapBlock {
+  BlockIndex index;
+  std::vector<RootVoxelRecord> roots;
+  std::vector<StaticOctreeNode,
+              Eigen::aligned_allocator<StaticOctreeNode>> nodes;
+  std::vector<StaticPlane, Eigen::aligned_allocator<StaticPlane>> planes;
+  SpatialMapPointVector display_points;
+};
+
+struct SpatialMapBuildResult {
+  SpatialMapConfig config;
+  std::size_t source_point_count = 0;
+  std::size_t fused_point_count = 0;
+  std::vector<StaticMapBlock> blocks;
 };
 
 std::int64_t floor_grid_index(double coordinate, double resolution);
