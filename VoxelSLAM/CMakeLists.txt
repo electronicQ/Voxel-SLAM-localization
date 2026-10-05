@@ -51,6 +51,7 @@ include_directories(
 
 add_library(voxel_slam_map_io
   src/BTC.cpp
+  src/spatial_map_types.cpp
   src/map_package.cpp
   src/btc_io.cpp
   src/mapping_capture.cpp
@@ -79,6 +80,16 @@ target_link_libraries(voxelslam
 )
 
 if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(spatial_map_types_test
+    test/spatial_map_types_test.cpp
+  )
+  if(TARGET spatial_map_types_test)
+    target_link_libraries(spatial_map_types_test
+      voxel_slam_map_io
+      ${catkin_LIBRARIES}
+    )
+  endif()
+
   catkin_add_gtest(map_package_roundtrip_test
     test/map_package_roundtrip_test.cpp
   )
