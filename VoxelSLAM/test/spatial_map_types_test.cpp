@@ -108,6 +108,15 @@ TEST(SpatialMapGeometry, RejectsRootVoxelCountOutsideSigned64BitRange) {
   EXPECT_NE(error.find("integer multiple"), std::string::npos);
 }
 
+TEST(SpatialMapGeometry, RejectsLargeNonIntegralRootVoxelRatio) {
+  SpatialMapConfig config;
+  std::string error;
+  config.size_x = 1000000000000.25;
+
+  EXPECT_FALSE(config.validate(error));
+  EXPECT_NE(error.find("integer multiple"), std::string::npos);
+}
+
 TEST(SpatialMapGeometry, MapsWorldAndNegativeRootVoxelsToBlocks) {
   const SpatialMapConfig config;
 
@@ -124,6 +133,29 @@ TEST(SpatialMapGeometry, MapsWorldAndNegativeRootVoxelsToBlocks) {
             BlockIndex(-2, -2, -2));
 }
 
+TEST(SpatialMapGeometry, WorldAndRootVoxelMappingsAgreeAtFloatingBoundary) {
+  SpatialMapConfig config;
+  config.size_x = 0.3;
+  config.size_y = 0.6;
+  config.size_z = 0.3;
+  config.root_voxel_size = 0.1;
+  std::string error;
+  ASSERT_TRUE(config.validate(error)) << error;
+
+  const double boundary = 0.3;
+  const std::vector<double> coordinates{
+      std::nextafter(boundary, -std::numeric_limits<double>::infinity()),
+      boundary,
+      std::nextafter(boundary, std::numeric_limits<double>::infinity()),
+      -boundary};
+  for (const double coordinate : coordinates) {
+    const Eigen::Vector3d point(coordinate, coordinate, coordinate);
+    EXPECT_EQ(world_to_block(point, config),
+              root_voxel_to_block(world_to_root_voxel(point, config),
+                                  config));
+  }
+}
+
 TEST(SpatialMapGeometry, SphereIntersectionIncludesSurfaceAndZeroRadius) {
   const SpatialMapConfig config;
   const BlockAabb aabb = block_aabb(BlockIndex(0, 0, 0), config);
@@ -138,6 +170,15 @@ TEST(SpatialMapGeometry, SphereIntersectionIncludesSurfaceAndZeroRadius) {
       Eigen::Vector3d(20.001, 5.0, 5.0), 0.0, aabb));
 }
 
+TEST(SpatialMapGeometry, RejectsAabbWithCollapsedDoubleBoundaries) {
+  const SpatialMapConfig config;
+
+  EXPECT_THROW(
+      block_aabb(BlockIndex(std::numeric_limits<std::int64_t>::max(), 0, 0),
+                 config),
+      std::overflow_error);
+}
+
 TEST(SpatialMapGeometry, EnumeratesOnlyBlocksWhoseAabbTouchesSphere) {
   SpatialMapConfig config;
   const Eigen::Vector3d center(45.0, 12.0, 3.0);
@@ -148,6 +189,21 @@ TEST(SpatialMapGeometry, EnumeratesOnlyBlocksWhoseAabbTouchesSphere) {
     EXPECT_TRUE(sphere_intersects_aabb(center, 30.0,
                                        block_aabb(index, config)));
   }
+}
+
+TEST(SpatialMapGeometry, EnumeratesCompleteSortedUniqueMultiAxisRange) {
+  const SpatialMapConfig config;
+  const std::vector<BlockIndex> blocks = blocks_intersecting_sphere(
+      Eigen::Vector3d(19.0, -1.0, 9.0), 2.0, config);
+  const std::vector<BlockIndex> expected{
+      BlockIndex(0, -1, 0), BlockIndex(0, -1, 1),
+      BlockIndex(0, 0, 0),  BlockIndex(0, 0, 1),
+      BlockIndex(1, -1, 0), BlockIndex(1, -1, 1),
+      BlockIndex(1, 0, 0),  BlockIndex(1, 0, 1)};
+
+  EXPECT_EQ(blocks, expected);
+  EXPECT_TRUE(std::is_sorted(blocks.begin(), blocks.end()));
+  EXPECT_EQ(std::adjacent_find(blocks.begin(), blocks.end()), blocks.end());
 }
 
 TEST(SpatialMapGeometry, IncludesAllBlocksTouchingBoundaryPoint) {

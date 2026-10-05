@@ -22,8 +22,13 @@ bool is_integer_multiple(double size, double root_voxel_size) {
     return false;
   }
   const double nearest = std::round(quotient);
-  const double tolerance =
-      1e-10 * std::max(1.0, std::abs(quotient));
+  const double lower = std::nextafter(
+      quotient, -std::numeric_limits<double>::infinity());
+  const double upper = std::nextafter(
+      quotient, std::numeric_limits<double>::infinity());
+  const double ulp =
+      std::max(quotient - lower, upper - quotient);
+  const double tolerance = std::min(1e-9, 4.0 * ulp);
   return nearest >= 1.0 &&
          nearest < static_cast<double>(
                        std::numeric_limits<std::int64_t>::max()) &&
@@ -41,6 +46,19 @@ std::int64_t root_voxels_per_block(double block_size,
                                    double root_voxel_size) {
   return static_cast<std::int64_t>(
       std::round(block_size / root_voxel_size));
+}
+
+double canonical_block_size(double block_size, double root_voxel_size) {
+  return static_cast<double>(
+             root_voxels_per_block(block_size, root_voxel_size)) *
+         root_voxel_size;
+}
+
+Eigen::Vector3d canonical_block_sizes(const SpatialMapConfig &config) {
+  return Eigen::Vector3d(
+      canonical_block_size(config.size_x, config.root_voxel_size),
+      canonical_block_size(config.size_y, config.root_voxel_size),
+      canonical_block_size(config.size_z, config.root_voxel_size));
 }
 
 std::int64_t floor_integer_divide(std::int64_t value,
@@ -238,13 +256,7 @@ std::int64_t floor_grid_index(double coordinate, double resolution) {
 
 BlockIndex world_to_block(const Eigen::Vector3d &point,
                           const SpatialMapConfig &config) {
-  require_valid_config(config);
-  if (!vector_is_finite(point)) {
-    throw std::invalid_argument("world coordinates must be finite");
-  }
-  return BlockIndex(floor_grid_index(point.x(), config.size_x),
-                    floor_grid_index(point.y(), config.size_y),
-                    floor_grid_index(point.z(), config.size_z));
+  return root_voxel_to_block(world_to_root_voxel(point, config), config);
 }
 
 RootVoxelIndex world_to_root_voxel(const Eigen::Vector3d &point,
@@ -276,17 +288,20 @@ BlockIndex root_voxel_to_block(const RootVoxelIndex &index,
 BlockAabb block_aabb(const BlockIndex &index,
                      const SpatialMapConfig &config) {
   require_valid_config(config);
+  const Eigen::Vector3d block_sizes = canonical_block_sizes(config);
   BlockAabb result;
   result.minimum = Eigen::Vector3d(
-      static_cast<double>(index.x) * config.size_x,
-      static_cast<double>(index.y) * config.size_y,
-      static_cast<double>(index.z) * config.size_z);
-  result.maximum =
-      result.minimum +
-      Eigen::Vector3d(config.size_x, config.size_y, config.size_z);
+      static_cast<double>(index.x) * block_sizes.x(),
+      static_cast<double>(index.y) * block_sizes.y(),
+      static_cast<double>(index.z) * block_sizes.z());
+  result.maximum = result.minimum + block_sizes;
   if (!vector_is_finite(result.minimum) ||
       !vector_is_finite(result.maximum)) {
     throw std::overflow_error("block AABB coordinates overflow");
+  }
+  if ((result.maximum.array() <= result.minimum.array()).any()) {
+    throw std::overflow_error(
+        "block AABB cannot represent distinct adjacent boundaries");
   }
   return result;
 }
@@ -313,6 +328,7 @@ std::vector<BlockIndex> blocks_intersecting_sphere(
     const SpatialMapConfig &config) {
   require_valid_config(config);
   require_valid_sphere(center, radius);
+  const Eigen::Vector3d block_sizes = canonical_block_sizes(config);
 
   const Eigen::Vector3d lower(
       checked_offset(center.x(), -radius),
@@ -324,12 +340,12 @@ std::vector<BlockIndex> blocks_intersecting_sphere(
       checked_offset(center.z(), radius));
 
   const BlockIndex first(
-      preceding_index(floor_grid_index(lower.x(), config.size_x)),
-      preceding_index(floor_grid_index(lower.y(), config.size_y)),
-      preceding_index(floor_grid_index(lower.z(), config.size_z)));
-  const BlockIndex last(floor_grid_index(upper.x(), config.size_x),
-                        floor_grid_index(upper.y(), config.size_y),
-                        floor_grid_index(upper.z(), config.size_z));
+      preceding_index(floor_grid_index(lower.x(), block_sizes.x())),
+      preceding_index(floor_grid_index(lower.y(), block_sizes.y())),
+      preceding_index(floor_grid_index(lower.z(), block_sizes.z())));
+  const BlockIndex last(floor_grid_index(upper.x(), block_sizes.x()),
+                        floor_grid_index(upper.y(), block_sizes.y()),
+                        floor_grid_index(upper.z(), block_sizes.z()));
 
   std::vector<BlockIndex> result;
   for (std::int64_t x = first.x;; ++x) {
