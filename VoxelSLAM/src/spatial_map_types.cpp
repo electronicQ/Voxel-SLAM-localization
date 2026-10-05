@@ -16,23 +16,51 @@ bool valid_positive(double value) {
   return std::isfinite(value) && value > 0.0;
 }
 
-bool is_integer_multiple(double size, double root_voxel_size) {
-  const double quotient = size / root_voxel_size;
-  if (!std::isfinite(quotient)) {
+constexpr double kMaxSafeRootVoxelsPerBlock = 9007199254740992.0;
+
+double bounded_ulp_tolerance(double value) {
+  const double lower = std::nextafter(
+      value, -std::numeric_limits<double>::infinity());
+  const double upper = std::nextafter(
+      value, std::numeric_limits<double>::infinity());
+  const double ulp = std::max(value - lower, upper - value);
+  return std::min(1e-9, 4.0 * ulp);
+}
+
+bool matches_with_bounded_ulp(double left, double right) {
+  if (!std::isfinite(left) || !std::isfinite(right)) {
     return false;
   }
+  const double tolerance =
+      std::max(bounded_ulp_tolerance(left),
+               bounded_ulp_tolerance(right));
+  return std::abs(left - right) <= tolerance;
+}
+
+enum class RootVoxelRatioStatus { kValid, kNotIntegral, kUnsafeCount };
+
+RootVoxelRatioStatus classify_root_voxel_ratio(
+    double size, double root_voxel_size, std::int64_t &count) {
+  const double quotient = size / root_voxel_size;
+  if (!std::isfinite(quotient) || quotient < 1.0) {
+    return RootVoxelRatioStatus::kNotIntegral;
+  }
+  if (quotient > kMaxSafeRootVoxelsPerBlock) {
+    return RootVoxelRatioStatus::kUnsafeCount;
+  }
+
   const double nearest = std::round(quotient);
-  const double lower = std::nextafter(
-      quotient, -std::numeric_limits<double>::infinity());
-  const double upper = std::nextafter(
-      quotient, std::numeric_limits<double>::infinity());
-  const double ulp =
-      std::max(quotient - lower, upper - quotient);
-  const double tolerance = std::min(1e-9, 4.0 * ulp);
-  return nearest >= 1.0 &&
-         nearest < static_cast<double>(
-                       std::numeric_limits<std::int64_t>::max()) &&
-         std::abs(quotient - nearest) <= tolerance;
+  if (!matches_with_bounded_ulp(quotient, nearest)) {
+    return RootVoxelRatioStatus::kNotIntegral;
+  }
+
+  count = static_cast<std::int64_t>(nearest);
+  const double canonical_size =
+      static_cast<double>(count) * root_voxel_size;
+  if (!matches_with_bounded_ulp(canonical_size, size)) {
+    return RootVoxelRatioStatus::kNotIntegral;
+  }
+  return RootVoxelRatioStatus::kValid;
 }
 
 void require_valid_config(const SpatialMapConfig &config) {
@@ -44,8 +72,12 @@ void require_valid_config(const SpatialMapConfig &config) {
 
 std::int64_t root_voxels_per_block(double block_size,
                                    double root_voxel_size) {
-  return static_cast<std::int64_t>(
-      std::round(block_size / root_voxel_size));
+  std::int64_t count = 0;
+  if (classify_root_voxel_ratio(block_size, root_voxel_size, count) !=
+      RootVoxelRatioStatus::kValid) {
+    throw std::invalid_argument("invalid block-to-root-voxel ratio");
+  }
+  return count;
 }
 
 double canonical_block_size(double block_size, double root_voxel_size) {
@@ -190,11 +222,21 @@ bool SpatialMapConfig::validate(std::string &error) const {
     }
   }
 
-  if (!is_integer_multiple(size_x, root_voxel_size) ||
-      !is_integer_multiple(size_y, root_voxel_size) ||
-      !is_integer_multiple(size_z, root_voxel_size)) {
-    error = "each block size must be an integer multiple of root_voxel_size";
-    return false;
+  const double block_sizes[] = {size_x, size_y, size_z};
+  for (const double block_size : block_sizes) {
+    std::int64_t root_voxel_count = 0;
+    const RootVoxelRatioStatus status = classify_root_voxel_ratio(
+        block_size, root_voxel_size, root_voxel_count);
+    if (status == RootVoxelRatioStatus::kUnsafeCount) {
+      error = "each block size must be an integer multiple of "
+              "root_voxel_size with no more than 2^53 root voxels";
+      return false;
+    }
+    if (status != RootVoxelRatioStatus::kValid) {
+      error =
+          "each block size must be an integer multiple of root_voxel_size";
+      return false;
+    }
   }
 
   if (max_layer < 0 ||

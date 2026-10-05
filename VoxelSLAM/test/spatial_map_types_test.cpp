@@ -117,6 +117,38 @@ TEST(SpatialMapGeometry, RejectsLargeNonIntegralRootVoxelRatio) {
   EXPECT_NE(error.find("integer multiple"), std::string::npos);
 }
 
+TEST(SpatialMapGeometry, RejectsAmbiguousRatioBeyondSafeDoubleIntegerRange) {
+  SpatialMapConfig config;
+  std::string error;
+  config.root_voxel_size = 0.1;
+  config.size_x = 1000000000000000.125;
+
+  EXPECT_FALSE(config.validate(error));
+  EXPECT_NE(error.find("2^53"), std::string::npos);
+}
+
+TEST(SpatialMapGeometry, RejectsCanonicalSizeMismatchWithinSafeCountRange) {
+  SpatialMapConfig config;
+  std::string error;
+  config.root_voxel_size = 0.1;
+  config.size_x = 1000000000.0000001;
+
+  EXPECT_FALSE(config.validate(error));
+  EXPECT_NE(error.find("integer multiple"), std::string::npos);
+}
+
+TEST(SpatialMapGeometry, AcceptsSafeIntegerLimitAndRejectsNextValue) {
+  SpatialMapConfig config;
+  std::string error;
+  config.size_x = std::ldexp(1.0, 53);
+
+  EXPECT_TRUE(config.validate(error)) << error;
+
+  config.size_x = std::ldexp(1.0, 53) + 2.0;
+  EXPECT_FALSE(config.validate(error));
+  EXPECT_NE(error.find("2^53"), std::string::npos);
+}
+
 TEST(SpatialMapGeometry, MapsWorldAndNegativeRootVoxelsToBlocks) {
   const SpatialMapConfig config;
 
