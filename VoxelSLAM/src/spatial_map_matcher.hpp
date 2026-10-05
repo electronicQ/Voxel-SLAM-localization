@@ -13,6 +13,7 @@ struct StaticPlaneMatch {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   Eigen::Vector3d center = Eigen::Vector3d::Zero();
   Eigen::Vector3d normal = Eigen::Vector3d::Zero();
+  // Point-to-plane distance variance in length^2, not standard deviation.
   double sigma_d = 0.0;
   BlockIndex block_index;
   std::uint32_t node_index = kInvalidSpatialIndex;

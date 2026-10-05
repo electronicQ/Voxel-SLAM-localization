@@ -55,6 +55,35 @@ int child_for_point(const StaticOctreeNode &node,
          (point.z() > node.center.z() ? 1 : 0);
 }
 
+bool query_path_reaches_hint(const StaticMapBlock &block,
+                             std::uint32_t root_node_index,
+                             const Eigen::Vector3d &world_point,
+                             std::uint32_t hint_node_index) {
+  std::uint32_t node_index = root_node_index;
+  for (std::size_t visited = 0; visited < block.nodes.size(); ++visited) {
+    if (node_index >= block.nodes.size()) {
+      return false;
+    }
+    const StaticOctreeNode &node = block.nodes[node_index];
+    if (!node_contains(node, world_point)) {
+      return false;
+    }
+    if (node_index == hint_node_index) {
+      return true;
+    }
+    if (node.plane_index != kInvalidSpatialIndex) {
+      return false;
+    }
+    const std::uint32_t child_index =
+        node.children[child_for_point(node, world_point)];
+    if (child_index == kInvalidSpatialIndex) {
+      return false;
+    }
+    node_index = child_index;
+  }
+  return false;
+}
+
 bool evaluate_plane(const StaticMapBlock &block,
                     std::uint32_t node_index,
                     const StaticPlane &plane,
@@ -138,17 +167,19 @@ bool StaticMapMatcher::match(
     const RootVoxelIndex root_index =
         world_to_root_voxel(world_point, config_);
 
-    std::uint32_t node_index = kInvalidSpatialIndex;
+    const std::uint32_t root_node_index =
+        find_root_node(block, root_index);
+    if (root_node_index == kInvalidSpatialIndex ||
+        root_node_index >= block.nodes.size()) {
+      return false;
+    }
+
+    std::uint32_t node_index = root_node_index;
     if (hint != nullptr && hint->block_index == block.index &&
         hint->node_index < block.nodes.size() &&
-        node_contains(block.nodes[hint->node_index], world_point)) {
+        query_path_reaches_hint(block, root_node_index, world_point,
+                                hint->node_index)) {
       node_index = hint->node_index;
-    } else {
-      node_index = find_root_node(block, root_index);
-    }
-    if (node_index == kInvalidSpatialIndex ||
-        node_index >= block.nodes.size()) {
-      return false;
     }
 
     for (std::size_t visited = 0; visited < block.nodes.size(); ++visited) {
