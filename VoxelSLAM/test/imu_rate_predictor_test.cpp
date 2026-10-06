@@ -252,6 +252,29 @@ TEST(ImuRatePredictor, IgnoresInvalidMaximumPredictionUpdates) {
   EXPECT_NEAR(after_negative.state.p.x(), 0.4, kTolerance);
 }
 
+TEST(ImuRatePredictor, InvalidConstructorHorizonFallsBackToDefault) {
+  const double invalid_values[] = {
+      std::numeric_limits<double>::quiet_NaN(),
+      std::numeric_limits<double>::infinity(), 0.0, -1.0};
+
+  for (double invalid_value : invalid_values) {
+    SCOPED_TRACE(invalid_value);
+    ImuRatePredictor predictor(invalid_value);
+    predictor.updateSnapshot(makePosterior(), 2.0);
+
+    const ImuRatePrediction at_default_boundary =
+        predictor.pushImu(gravityBalancedSample(0.5));
+    const ImuRatePrediction beyond_default =
+        predictor.pushImu(gravityBalancedSample(0.6));
+
+    EXPECT_TRUE(at_default_boundary.publishable);
+    EXPECT_EQ(at_default_boundary.reason, ImuRateRejectReason::NONE);
+    EXPECT_FALSE(beyond_default.publishable);
+    EXPECT_EQ(beyond_default.reason,
+              ImuRateRejectReason::PREDICTION_HORIZON_EXCEEDED);
+  }
+}
+
 TEST(ImuRatePredictor, IgnoresInvalidSnapshotUpdates) {
   ImuRatePredictor predictor(0.5);
   IMUST posterior = makePosterior();
@@ -314,6 +337,47 @@ TEST(ImuRatePredictor, BlocksReplayAcrossEvictedTailUntilCoverageRecovers) {
   covered.p.x() = 2.0 * kDt;
   covered.v = Eigen::Vector3d::UnitX();
   predictor.updateSnapshot(covered, 2.0);
+  const ImuRatePrediction recovered = predictor.pushImu(
+      gravityBalancedSample((kRetainedSampleLimit + 3) * kDt));
+
+  ASSERT_TRUE(recovered.publishable);
+  EXPECT_EQ(recovered.reason, ImuRateRejectReason::NONE);
+  EXPECT_NEAR(recovered.state.p.x(),
+              (kRetainedSampleLimit + 3) * kDt, kTolerance);
+}
+
+TEST(ImuRatePredictor, KeepsReplayBoundaryAfterSuccessfulRecovery) {
+  constexpr int kRetainedSampleLimit = 4096;
+  constexpr double kDt = 0.001;
+  ImuRatePredictor predictor(10.0);
+  IMUST initial = makePosterior();
+  initial.v = Eigen::Vector3d::UnitX();
+  predictor.updateSnapshot(initial, 2.0);
+
+  for (int i = 1; i <= kRetainedSampleLimit + 1; ++i) {
+    const ImuRatePrediction prediction =
+        predictor.pushImu(gravityBalancedSample(i * kDt));
+    ASSERT_TRUE(prediction.publishable) << "sample " << i;
+  }
+
+  IMUST first_boundary = makePosterior(kDt);
+  first_boundary.p.x() = kDt;
+  first_boundary.v = Eigen::Vector3d::UnitX();
+  predictor.updateSnapshot(first_boundary, 2.0);
+
+  IMUST too_old = makePosterior(0.5 * kDt);
+  too_old.p.x() = 0.5 * kDt;
+  too_old.v = Eigen::Vector3d::UnitX();
+  predictor.updateSnapshot(too_old, 2.0);
+  const ImuRatePrediction blocked = predictor.pushImu(
+      gravityBalancedSample((kRetainedSampleLimit + 2) * kDt));
+  EXPECT_FALSE(blocked.publishable);
+  EXPECT_EQ(blocked.reason, ImuRateRejectReason::NO_SNAPSHOT);
+
+  IMUST current_boundary = makePosterior(2.0 * kDt);
+  current_boundary.p.x() = 2.0 * kDt;
+  current_boundary.v = Eigen::Vector3d::UnitX();
+  predictor.updateSnapshot(current_boundary, 2.0);
   const ImuRatePrediction recovered = predictor.pushImu(
       gravityBalancedSample((kRetainedSampleLimit + 3) * kDt));
 

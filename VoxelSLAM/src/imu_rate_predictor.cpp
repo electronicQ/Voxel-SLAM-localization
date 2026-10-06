@@ -38,9 +38,9 @@ bool propagate(const ImuRateSample &sample, double acceleration_scale,
 
 ImuRatePredictor::ImuRatePredictor(double max_prediction_sec)
     : max_prediction_sec_(
-          std::isfinite(max_prediction_sec) && max_prediction_sec >= 0.0
+          std::isfinite(max_prediction_sec) && max_prediction_sec > 0.0
               ? max_prediction_sec
-              : 0.0) {
+              : 0.5) {
   snapshot_.g.setZero();
   predicted_.g.setZero();
 }
@@ -75,10 +75,14 @@ void ImuRatePredictor::updateSnapshot(const IMUST &posterior,
   acceleration_scale_ = acceleration_scale;
   has_snapshot_ = true;
   replay_coverage_valid_ = true;
-  has_replay_coverage_boundary_ = false;
 
   while (!tail_.empty() && tail_.front().t <= posterior.t) {
     tail_.pop_front();
+  }
+  if (!has_replay_coverage_boundary_ ||
+      posterior.t > replay_coverage_boundary_) {
+    replay_coverage_boundary_ = posterior.t;
+    has_replay_coverage_boundary_ = true;
   }
 
   for (const ImuRateSample &sample : tail_) {
@@ -114,8 +118,11 @@ ImuRatePrediction ImuRatePredictor::pushImu(const ImuRateSample &sample) {
   predicted_ = candidate;
   tail_.push_back(sample);
   if (tail_.size() > kMaxRetainedSamples) {
-    replay_coverage_boundary_ = tail_.front().t;
-    has_replay_coverage_boundary_ = true;
+    if (!has_replay_coverage_boundary_ ||
+        tail_.front().t > replay_coverage_boundary_) {
+      replay_coverage_boundary_ = tail_.front().t;
+      has_replay_coverage_boundary_ = true;
+    }
     tail_.pop_front();
   }
 
