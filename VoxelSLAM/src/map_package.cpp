@@ -1,6 +1,8 @@
 #include "map_package.hpp"
 
 #include "btc_io.hpp"
+#include "spatial_map_builder.hpp"
+#include "spatial_map_io.hpp"
 
 #include <boost/filesystem.hpp>
 #include <boost/system/error_code.hpp>
@@ -107,7 +109,8 @@ bool validateConfig(const ConfigSetting &config, std::string &error) {
          checkFinite(config.dis_threshold_, "dis_threshold_", error);
 }
 
-bool validateOptions(const MapPackageOptions &options, std::string &error) {
+bool validateRuntimeOptions(const MapPackageOptions &options,
+                            std::string &error) {
   if (!std::isfinite(options.keyframe_distance_m)) {
     return fail(error, "non-finite map package option: keyframe_distance_m");
   }
@@ -118,6 +121,71 @@ bool validateOptions(const MapPackageOptions &options, std::string &error) {
     return fail(error, "non-finite map package option: keyframe_voxel_size");
   }
   return validateConfig(options.btc_config, error);
+}
+
+bool validateOptions(const MapPackageOptions &options, std::string &error) {
+  if (!validateRuntimeOptions(options, error)) {
+    return false;
+  }
+  std::string spatial_error;
+  if (!options.spatial_map.validate(spatial_error)) {
+    return fail(error, "invalid spatial map configuration: " +
+                           spatial_error);
+  }
+  return true;
+}
+
+bool spatialConfigsEqual(const SpatialMapConfig &left,
+                         const SpatialMapConfig &right) {
+  return left.size_x == right.size_x && left.size_y == right.size_y &&
+         left.size_z == right.size_z &&
+         left.fusion_leaf_size == right.fusion_leaf_size &&
+         left.root_voxel_size == right.root_voxel_size &&
+         left.max_layer == right.max_layer &&
+         left.min_eigen_value == right.min_eigen_value &&
+         left.min_points == right.min_points &&
+         left.plane_ratio_threshold == right.plane_ratio_threshold &&
+         left.save_display_cloud == right.save_display_cloud;
+}
+
+bool buildSpatialMap(const SavedMap &map, const SpatialMapConfig &config,
+                     SpatialMapBuildResult &result, std::string &error) {
+  SpatialMapPointVector points;
+  std::size_t point_count = 0U;
+  for (const SavedKeyframe &keyframe : map.keyframes) {
+    if (!keyframe.cloud ||
+        point_count > std::numeric_limits<std::size_t>::max() -
+                          keyframe.cloud->size()) {
+      return fail(error, "invalid keyframe cloud while building spatial map");
+    }
+    point_count += keyframe.cloud->size();
+  }
+  points.reserve(point_count);
+  for (const SavedKeyframe &keyframe : map.keyframes) {
+    for (const PointType &point : keyframe.cloud->points) {
+      const Eigen::Vector3d local(point.x, point.y, point.z);
+      const Eigen::Vector3d diagonal(point.normal_x, point.normal_y,
+                                     point.normal_z);
+      if (!local.array().isFinite().all() ||
+          !diagonal.array().isFinite().all() ||
+          (diagonal.array() < 0.0).any() ||
+          !std::isfinite(static_cast<double>(point.intensity))) {
+        return fail(error,
+                    "keyframe contains invalid point covariance for spatial map");
+      }
+      SpatialMapPoint transformed;
+      transformed.position = keyframe.pose.R * local + keyframe.pose.t;
+      transformed.covariance =
+          keyframe.pose.R * diagonal.asDiagonal() * keyframe.pose.R.transpose();
+      transformed.intensity = point.intensity;
+      if (!transformed.position.array().isFinite().all() ||
+          !transformed.covariance.array().isFinite().all()) {
+        return fail(error, "keyframe transform produced invalid spatial point");
+      }
+      points.push_back(transformed);
+    }
+  }
+  return SpatialMapBuilder::build(points, config, result, error);
 }
 
 void appendConfigField(std::ostringstream &serialized, const char *name,
@@ -288,6 +356,8 @@ class TemporaryDirectoryGuard {
 
 bool writeManifest(const fs::path &path, const SavedMap &map,
                    const MapPackageOptions &options,
+                   const SpatialMapConfig &spatial_config,
+                   std::size_t spatial_block_count,
                    const std::string &fingerprint, std::string &error) {
   std::ofstream output(path.string().c_str(), std::ios::out | std::ios::trunc);
   if (!output) {
@@ -296,7 +366,7 @@ bool writeManifest(const fs::path &path, const SavedMap &map,
   output.imbue(std::locale::classic());
   output << std::setprecision(std::numeric_limits<double>::max_digits10)
          << "format: voxel_slam_map\n"
-         << "version: 1\n"
+         << "version: 2\n"
          << "coordinate_frame: map\n"
          << "keyframe_cloud_frame: imu\n"
          << "win_size: " << options.win_size << '\n'
@@ -306,7 +376,29 @@ bool writeManifest(const fs::path &path, const SavedMap &map,
          << "descriptor_policy: one_per_fused_keyframe\n"
          << "btc_config_fingerprint: " << fingerprint << '\n'
          << "keyframe_count: " << map.keyframes.size() << '\n'
-         << "btc_frame_count: " << map.btc_frames.size() << '\n';
+         << "btc_frame_count: " << map.btc_frames.size() << '\n'
+         << "spatial_size_x: " << spatial_config.size_x << '\n'
+         << "spatial_size_y: " << spatial_config.size_y << '\n'
+         << "spatial_size_z: " << spatial_config.size_z << '\n'
+         << "spatial_fusion_leaf_size: "
+         << spatial_config.fusion_leaf_size << '\n'
+         << "spatial_root_voxel_size: "
+         << spatial_config.root_voxel_size << '\n'
+         << "spatial_max_layer: " << spatial_config.max_layer << '\n'
+         << "spatial_min_eigen_value: "
+         << spatial_config.min_eigen_value << '\n';
+  for (std::size_t i = 0; i < spatial_config.min_points.size(); ++i) {
+    output << "spatial_min_points_" << i << ": "
+           << spatial_config.min_points[i] << '\n';
+  }
+  for (std::size_t i = 0;
+       i < spatial_config.plane_ratio_threshold.size(); ++i) {
+    output << "spatial_plane_ratio_" << i << ": "
+           << spatial_config.plane_ratio_threshold[i] << '\n';
+  }
+  output << "spatial_save_display_cloud: "
+         << (spatial_config.save_display_cloud ? 1 : 0) << '\n'
+         << "spatial_block_count: " << spatial_block_count << '\n';
   output.close();
   if (!output) {
     return fail(error, "failed writing manifest: " + path.string());
@@ -410,7 +502,15 @@ bool parseManifest(const fs::path &path,
       "keyframe_distance_m",                  "keyframe_angle_deg",
       "keyframe_voxel_size",                  "descriptor_policy",
       "btc_config_fingerprint",               "keyframe_count",
-      "btc_frame_count"};
+      "btc_frame_count",                       "spatial_size_x",
+      "spatial_size_y",                        "spatial_size_z",
+      "spatial_fusion_leaf_size",              "spatial_root_voxel_size",
+      "spatial_max_layer",                     "spatial_min_eigen_value",
+      "spatial_min_points_0",                  "spatial_min_points_1",
+      "spatial_min_points_2",                  "spatial_min_points_3",
+      "spatial_plane_ratio_0",                 "spatial_plane_ratio_1",
+      "spatial_plane_ratio_2",                 "spatial_plane_ratio_3",
+      "spatial_save_display_cloud",            "spatial_block_count"};
 
   std::string line;
   int line_number = 0;
@@ -442,7 +542,13 @@ bool parseManifest(const fs::path &path,
   if (!input.eof()) {
     return fail(error, "failed reading manifest: " + path.string());
   }
-  for (const std::string &key : allowed_keys) {
+  return true;
+}
+
+bool requireManifestFields(
+    const std::map<std::string, std::string> &values,
+    const std::vector<std::string> &required, std::string &error) {
+  for (const std::string &key : required) {
     if (values.find(key) == values.end()) {
       return fail(error, "missing manifest field: " + key);
     }
@@ -482,10 +588,36 @@ bool parseManifestDouble(const std::map<std::string, std::string> &values,
 
 bool validateManifest(const std::map<std::string, std::string> &values,
                       const MapPackageOptions &options, int &keyframe_count,
-                       int &btc_frame_count,
+                      int &btc_frame_count, SpatialMapConfig &spatial_config,
+                      int &spatial_block_count,
                       std::string &error) {
+  const std::vector<std::string> base_required = {
+      "format", "version", "coordinate_frame", "keyframe_cloud_frame",
+      "win_size", "keyframe_distance_m", "keyframe_angle_deg",
+      "keyframe_voxel_size", "descriptor_policy",
+      "btc_config_fingerprint", "keyframe_count", "btc_frame_count"};
+  if (!requireManifestFields(values, base_required, error)) {
+    return false;
+  }
+  if (values.at("version") == "1") {
+    return fail(error,
+                "legacy map package version 1 is not loadable for localization; "
+                "run build_spatial_map to convert it to version 2");
+  }
+  const std::vector<std::string> spatial_required = {
+      "spatial_size_x", "spatial_size_y", "spatial_size_z",
+      "spatial_fusion_leaf_size", "spatial_root_voxel_size",
+      "spatial_max_layer", "spatial_min_eigen_value",
+      "spatial_min_points_0", "spatial_min_points_1",
+      "spatial_min_points_2", "spatial_min_points_3",
+      "spatial_plane_ratio_0", "spatial_plane_ratio_1",
+      "spatial_plane_ratio_2", "spatial_plane_ratio_3",
+      "spatial_save_display_cloud", "spatial_block_count"};
+  if (!requireManifestFields(values, spatial_required, error)) {
+    return false;
+  }
   if (!expectManifestValue(values, "format", "voxel_slam_map", error) ||
-      !expectManifestValue(values, "version", "1", error) ||
+      !expectManifestValue(values, "version", "2", error) ||
       !expectManifestValue(values, "coordinate_frame", "map", error) ||
       !expectManifestValue(values, "keyframe_cloud_frame", "imu", error) ||
       !expectManifestValue(values, "descriptor_policy",
@@ -505,11 +637,49 @@ bool validateManifest(const std::map<std::string, std::string> &values,
       !parseManifestDouble(values, "keyframe_voxel_size", keyframe_voxel_size,
                            error) ||
       !parseManifestInt(values, "keyframe_count", keyframe_count, error) ||
-      !parseManifestInt(values, "btc_frame_count", btc_frame_count, error)) {
+      !parseManifestInt(values, "btc_frame_count", btc_frame_count, error) ||
+      !parseManifestDouble(values, "spatial_size_x", spatial_config.size_x,
+                           error) ||
+      !parseManifestDouble(values, "spatial_size_y", spatial_config.size_y,
+                           error) ||
+      !parseManifestDouble(values, "spatial_size_z", spatial_config.size_z,
+                           error) ||
+      !parseManifestDouble(values, "spatial_fusion_leaf_size",
+                           spatial_config.fusion_leaf_size, error) ||
+      !parseManifestDouble(values, "spatial_root_voxel_size",
+                           spatial_config.root_voxel_size, error) ||
+      !parseManifestInt(values, "spatial_max_layer",
+                        spatial_config.max_layer, error) ||
+      !parseManifestDouble(values, "spatial_min_eigen_value",
+                           spatial_config.min_eigen_value, error) ||
+      !parseManifestInt(values, "spatial_block_count", spatial_block_count,
+                        error)) {
     return false;
   }
-  if (keyframe_count < 0 || btc_frame_count < 0) {
+  for (std::size_t i = 0; i < spatial_config.min_points.size(); ++i) {
+    if (!parseManifestInt(values, "spatial_min_points_" + std::to_string(i),
+                          spatial_config.min_points[i], error) ||
+        !parseManifestDouble(
+            values, "spatial_plane_ratio_" + std::to_string(i),
+            spatial_config.plane_ratio_threshold[i], error)) {
+      return false;
+    }
+  }
+  int save_display_cloud = 0;
+  if (!parseManifestInt(values, "spatial_save_display_cloud",
+                        save_display_cloud, error) ||
+      (save_display_cloud != 0 && save_display_cloud != 1)) {
+    return fail(error, "invalid spatial_save_display_cloud manifest field");
+  }
+  spatial_config.save_display_cloud = save_display_cloud != 0;
+  if (keyframe_count < 0 || btc_frame_count < 0 ||
+      spatial_block_count < 0) {
     return fail(error, "manifest counts must be non-negative");
+  }
+  std::string spatial_error;
+  if (!spatial_config.validate(spatial_error)) {
+    return fail(error, "invalid manifest spatial map configuration: " +
+                           spatial_error);
   }
   if (win_size != options.win_size) {
     return fail(error, "manifest win_size does not match load options");
@@ -524,6 +694,43 @@ bool validateManifest(const std::map<std::string, std::string> &values,
   if (values.at("btc_config_fingerprint") != expected_fingerprint) {
     return fail(error,
                 "manifest btc_config_fingerprint does not match load options");
+  }
+  return true;
+}
+
+bool validateLegacyManifest(
+    const std::map<std::string, std::string> &values,
+    MapPackageOptions &options, std::string &fingerprint,
+    int &keyframe_count, int &btc_frame_count, std::string &error) {
+  const std::vector<std::string> required = {
+      "format", "version", "coordinate_frame", "keyframe_cloud_frame",
+      "win_size", "keyframe_distance_m", "keyframe_angle_deg",
+      "keyframe_voxel_size", "descriptor_policy",
+      "btc_config_fingerprint", "keyframe_count", "btc_frame_count"};
+  if (!requireManifestFields(values, required, error) ||
+      !expectManifestValue(values, "format", "voxel_slam_map", error) ||
+      !expectManifestValue(values, "version", "1", error) ||
+      !expectManifestValue(values, "coordinate_frame", "map", error) ||
+      !expectManifestValue(values, "keyframe_cloud_frame", "imu", error) ||
+      !expectManifestValue(values, "descriptor_policy",
+                           "one_per_fused_keyframe", error) ||
+      !parseManifestInt(values, "win_size", options.win_size, error) ||
+      !parseManifestDouble(values, "keyframe_distance_m",
+                           options.keyframe_distance_m, error) ||
+      !parseManifestDouble(values, "keyframe_angle_deg",
+                           options.keyframe_angle_deg, error) ||
+      !parseManifestDouble(values, "keyframe_voxel_size",
+                           options.keyframe_voxel_size, error) ||
+      !parseManifestInt(values, "keyframe_count", keyframe_count, error) ||
+      !parseManifestInt(values, "btc_frame_count", btc_frame_count, error)) {
+    return false;
+  }
+  if (keyframe_count < 0 || btc_frame_count < 0) {
+    return fail(error, "legacy manifest counts must be non-negative");
+  }
+  fingerprint = values.at("btc_config_fingerprint");
+  if (fingerprint.empty()) {
+    return fail(error, "legacy manifest has an empty BTC fingerprint");
   }
   return true;
 }
@@ -717,8 +924,12 @@ std::string btc_config_fingerprint(const ConfigSetting &config) {
   return fnv1a64(serializeConfig(config));
 }
 
-bool MapPackageIO::save(const std::string &directory, const SavedMap &map,
-                        const MapPackageOptions &options, std::string &error) {
+namespace {
+
+bool savePackageInternal(const std::string &directory, const SavedMap &map,
+                         const MapPackageOptions &options,
+                         const std::string &fingerprint_override,
+                         std::string &error) {
   error.clear();
   try {
     if (directory.empty()) {
@@ -760,15 +971,26 @@ bool MapPackageIO::save(const std::string &directory, const SavedMap &map,
       return fail(error, "cannot create temporary keyframe directory");
     }
 
-    const std::string fingerprint =
-        btc_config_fingerprint(options.btc_config);
+    const std::string fingerprint = fingerprint_override.empty()
+                                        ? btc_config_fingerprint(
+                                              options.btc_config)
+                                        : fingerprint_override;
     if (fingerprint.empty()) {
       return fail(error, "cannot fingerprint non-finite BTC config");
     }
-    if (!writeManifest(temporary_directory / kManifestFile, map, options,
-                       fingerprint, error) ||
+    SpatialMapBuildResult spatial_result;
+    if (!buildSpatialMap(map, options.spatial_map, spatial_result, error) ||
         !writeKeyframes(temporary_directory, map, error) ||
         !writeBtcArtifacts(temporary_directory, map, error)) {
+      return false;
+    }
+    SpatialMapCatalog spatial_catalog;
+    if (!SpatialMapIO::save(temporary_directory.string(),
+                            spatial_result.blocks, options.spatial_map,
+                            spatial_catalog, error) ||
+        !writeManifest(temporary_directory / kManifestFile, map, options,
+                       options.spatial_map, spatial_catalog.entries.size(),
+                       fingerprint, error)) {
       return false;
     }
 
@@ -785,11 +1007,21 @@ bool MapPackageIO::save(const std::string &directory, const SavedMap &map,
   }
 }
 
-bool MapPackageIO::load(const std::string &directory, SavedMap &map,
-                        const MapPackageOptions &options, std::string &error) {
+}  // namespace
+
+bool MapPackageIO::save(const std::string &directory, const SavedMap &map,
+                        const MapPackageOptions &options,
+                        std::string &error) {
+  return savePackageInternal(directory, map, options, std::string(), error);
+}
+
+bool MapPackageIO::load(const std::string &directory,
+                        LoadedMapPackage &package,
+                        const MapPackageOptions &options,
+                        std::string &error) {
   error.clear();
   try {
-    if (!validateOptions(options, error)) {
+    if (!validateRuntimeOptions(options, error)) {
       return false;
     }
     const fs::path package_directory(directory);
@@ -803,7 +1035,10 @@ bool MapPackageIO::load(const std::string &directory, SavedMap &map,
     }
     int keyframe_count = 0;
     int btc_frame_count = 0;
+    int spatial_block_count = 0;
+    SpatialMapConfig manifest_spatial_config;
     if (!validateManifest(manifest, options, keyframe_count, btc_frame_count,
+                          manifest_spatial_config, spatial_block_count,
                           error)) {
       return false;
     }
@@ -816,10 +1051,84 @@ bool MapPackageIO::load(const std::string &directory, SavedMap &map,
                           loaded.keyframes.size(), loaded, error)) {
       return false;
     }
-    map = std::move(loaded);
+    SpatialMapCatalog spatial_catalog;
+    if (!SpatialMapIO::load_catalog(directory, spatial_catalog, error)) {
+      return false;
+    }
+    if (!spatialConfigsEqual(manifest_spatial_config,
+                             spatial_catalog.config)) {
+      return fail(error,
+                  "manifest spatial configuration does not match block index");
+    }
+    if (spatial_catalog.entries.size() !=
+        static_cast<std::size_t>(spatial_block_count)) {
+      return fail(error, "manifest spatial block count does not match index");
+    }
+    LoadedMapPackage candidate;
+    candidate.historical_map = std::move(loaded);
+    candidate.spatial_catalog = std::move(spatial_catalog);
+    candidate.directory = directory;
+    package = std::move(candidate);
     return true;
   } catch (const std::exception &exception) {
     return fail(error, std::string("map package load failed: ") +
                            exception.what());
   }
+}
+
+bool MapPackageIO::load(const std::string &directory, SavedMap &map,
+                        const MapPackageOptions &options,
+                        std::string &error) {
+  LoadedMapPackage loaded;
+  if (!load(directory, loaded, options, error)) {
+    return false;
+  }
+  map = std::move(loaded.historical_map);
+  return true;
+}
+
+bool MapPackageIO::load_legacy_v1(const std::string &directory,
+                                  LoadedLegacyMapPackage &package,
+                                  std::string &error) {
+  error.clear();
+  try {
+    const fs::path package_directory(directory);
+    if (!fs::is_directory(package_directory)) {
+      return fail(error, "legacy map package directory does not exist: " +
+                             directory);
+    }
+    std::map<std::string, std::string> manifest;
+    if (!parseManifest(package_directory / kManifestFile, manifest, error)) {
+      return false;
+    }
+    LoadedLegacyMapPackage candidate;
+    int keyframe_count = 0;
+    int btc_frame_count = 0;
+    if (!validateLegacyManifest(manifest, candidate.options,
+                                candidate.btc_config_fingerprint,
+                                keyframe_count, btc_frame_count, error)) {
+      return false;
+    }
+    if (!loadKeyframes(package_directory, keyframe_count,
+                       candidate.historical_map, error) ||
+        !loadBtcArtifacts(package_directory, btc_frame_count,
+                          candidate.historical_map.keyframes.size(),
+                          candidate.historical_map, error)) {
+      return false;
+    }
+    package = std::move(candidate);
+    return true;
+  } catch (const std::exception &exception) {
+    return fail(error, std::string("legacy map package load failed: ") +
+                           exception.what());
+  }
+}
+
+bool MapPackageIO::save_converted_legacy(
+    const std::string &directory, const LoadedLegacyMapPackage &legacy,
+    const SpatialMapConfig &spatial_config, std::string &error) {
+  MapPackageOptions options = legacy.options;
+  options.spatial_map = spatial_config;
+  return savePackageInternal(directory, legacy.historical_map, options,
+                             legacy.btc_config_fingerprint, error);
 }

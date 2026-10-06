@@ -2,6 +2,7 @@
 
 #include "BTC.h"
 #include "feature_point.hpp"
+#include "spatial_map_io.hpp"
 
 #include <Eigen/Core>
 #include <pcl/point_cloud.h>
@@ -40,6 +41,19 @@ struct MapPackageOptions {
   double keyframe_angle_deg = 5.0;
   double keyframe_voxel_size = 0.1;
   ConfigSetting btc_config{};
+  SpatialMapConfig spatial_map{};
+};
+
+struct LoadedMapPackage {
+  SavedMap historical_map;
+  SpatialMapCatalog spatial_catalog;
+  std::string directory;
+};
+
+struct LoadedLegacyMapPackage {
+  SavedMap historical_map;
+  MapPackageOptions options;
+  std::string btc_config_fingerprint;
 };
 
 class MapPackageIO {
@@ -48,6 +62,18 @@ class MapPackageIO {
                    const MapPackageOptions &options, std::string &error);
   static bool load(const std::string &directory, SavedMap &map,
                    const MapPackageOptions &options, std::string &error);
+
+  static bool load(const std::string &directory, LoadedMapPackage &package,
+                   const MapPackageOptions &options, std::string &error);
+
+  // Converter-only compatibility path. Localization must use the v2 loader.
+  static bool load_legacy_v1(const std::string &directory,
+                             LoadedLegacyMapPackage &package,
+                             std::string &error);
+
+  static bool save_converted_legacy(
+      const std::string &directory, const LoadedLegacyMapPackage &legacy,
+      const SpatialMapConfig &spatial_config, std::string &error);
 };
 
 std::string btc_config_fingerprint(const ConfigSetting &config);

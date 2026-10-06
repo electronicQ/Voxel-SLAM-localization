@@ -82,7 +82,30 @@ target_link_libraries(voxelslam
   gtsam
 )
 
+add_executable(build_spatial_map src/build_spatial_map.cpp)
+target_link_libraries(build_spatial_map
+  voxel_slam_map_io
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${Boost_LIBRARIES}
+)
+
+install(TARGETS build_spatial_map
+  RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
 if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(spatial_map_conversion_test
+    test/spatial_map_conversion_test.cpp
+  )
+  if(TARGET spatial_map_conversion_test)
+    target_link_libraries(spatial_map_conversion_test
+      voxel_slam_map_io
+      ${catkin_LIBRARIES}
+      ${Boost_LIBRARIES}
+    )
+  endif()
+
   catkin_add_gtest(spatial_map_io_test
     test/spatial_map_io_test.cpp
   )

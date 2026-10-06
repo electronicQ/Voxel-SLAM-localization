@@ -380,10 +380,14 @@ TEST(MapPackageIO, RoundTripsLocalFrameKeyframesAndExactPaths) {
   EXPECT_TRUE(fs::is_regular_file(temp.path() / "keyframes.csv"));
   EXPECT_TRUE(fs::is_regular_file(temp.path() / "keyframes" / "000000.pcd"));
   EXPECT_TRUE(fs::is_regular_file(temp.path() / "keyframes" / "000001.pcd"));
+  EXPECT_TRUE(fs::is_regular_file(temp.path() / "spatial_blocks.idx"));
+  EXPECT_TRUE(fs::is_regular_file(temp.path() / "spatial_blocks.bin"));
 
   const std::string manifest = readFile(temp.path() / "manifest.yaml");
   EXPECT_NE(manifest.find("format: voxel_slam_map"), std::string::npos);
-  EXPECT_NE(manifest.find("version: 1"), std::string::npos);
+  EXPECT_NE(manifest.find("version: 2"), std::string::npos);
+  EXPECT_NE(manifest.find("spatial_size_x: 20"), std::string::npos);
+  EXPECT_NE(manifest.find("spatial_root_voxel_size: 1"), std::string::npos);
   EXPECT_NE(manifest.find("coordinate_frame: map"), std::string::npos);
   EXPECT_NE(manifest.find("keyframe_cloud_frame: imu"), std::string::npos);
   EXPECT_NE(manifest.find("descriptor_policy: one_per_fused_keyframe"),
@@ -603,11 +607,33 @@ TEST(MapPackageIO, RejectsWrongManifestVersion) {
   ASSERT_TRUE(MapPackageIO::save(temp.map_path(), makeTwoKeyframeMap(), options,
                                  error))
       << error;
-  replaceOnce(temp.path() / "manifest.yaml", "version: 1", "version: 2");
+  replaceOnce(temp.path() / "manifest.yaml", "version: 2", "version: 1");
 
   SavedMap output;
   EXPECT_FALSE(MapPackageIO::load(temp.map_path(), output, options, error));
-  EXPECT_NE(error.find("version"), std::string::npos) << error;
+  EXPECT_NE(error.find("build_spatial_map"), std::string::npos) << error;
+}
+
+TEST(MapPackageIO, LoadsSpatialCatalogWithoutReadingEveryBlock) {
+  TemporaryMapPath temp;
+  MapPackageOptions options = makeOptions();
+  options.spatial_map.size_x = 10.0;
+  options.spatial_map.size_y = 10.0;
+  options.spatial_map.size_z = 5.0;
+  std::string error;
+  ASSERT_TRUE(MapPackageIO::save(temp.map_path(), makeTwoKeyframeMap(),
+                                 options, error)) << error;
+
+  LoadedMapPackage loaded;
+  MapPackageOptions runtime_options = options;
+  runtime_options.spatial_map = SpatialMapConfig();
+  ASSERT_TRUE(MapPackageIO::load(temp.map_path(), loaded, runtime_options,
+                                 error)) << error;
+  EXPECT_EQ(loaded.directory, temp.map_path());
+  EXPECT_DOUBLE_EQ(loaded.spatial_catalog.config.size_x, 10.0);
+  EXPECT_DOUBLE_EQ(loaded.spatial_catalog.config.size_y, 10.0);
+  EXPECT_DOUBLE_EQ(loaded.spatial_catalog.config.size_z, 5.0);
+  EXPECT_EQ(loaded.historical_map.keyframes.size(), 2U);
 }
 
 TEST(MapPackageIO, RejectsMissingKeyframeCloud) {
