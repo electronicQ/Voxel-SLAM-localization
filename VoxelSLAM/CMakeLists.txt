@@ -55,6 +55,7 @@ add_library(voxel_slam_map_io
   src/spatial_map_builder.cpp
   src/spatial_map_matcher.cpp
   src/spatial_map_io.cpp
+  src/spatial_map_manager.cpp
   src/map_package.cpp
   src/btc_io.cpp
   src/mapping_capture.cpp
@@ -95,6 +96,17 @@ install(TARGETS build_spatial_map
 )
 
 if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(spatial_map_manager_test
+    test/spatial_map_manager_test.cpp
+  )
+  if(TARGET spatial_map_manager_test)
+    target_link_libraries(spatial_map_manager_test
+      voxel_slam_map_io
+      ${catkin_LIBRARIES}
+      ${Boost_LIBRARIES}
+    )
+  endif()
+
   catkin_add_gtest(spatial_map_conversion_test
     test/spatial_map_conversion_test.cpp
   )
