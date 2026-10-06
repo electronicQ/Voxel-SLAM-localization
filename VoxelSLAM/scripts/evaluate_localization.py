@@ -14,6 +14,7 @@ import bisect
 import hashlib
 import math
 import pathlib
+import re
 import sys
 from dataclasses import dataclass
 from typing import Iterable, List, Sequence, Tuple
@@ -40,6 +41,24 @@ class LocalizationMetrics:
 
 
 @dataclass(frozen=True)
+class SpatialRuntimeMetrics:
+    samples: int
+    spatial_active_blocks_max: int
+    spatial_pending_blocks_max: int
+    spatial_core_ready_ratio: float
+    spatial_load_ms_mean: float
+    spatial_load_ms_p95: float
+    spatial_load_ms_max: float
+    spatial_match_ms_mean: float
+    spatial_match_ms_p95: float
+    spatial_match_ms_max: float
+    frame_ms_mean: float
+    frame_ms_p95: float
+    frame_ms_max: float
+    memory_mb_peak: float
+
+
+@dataclass(frozen=True)
 class FileHash:
     relative_path: str
     sha256: str
@@ -49,6 +68,76 @@ class FileHash:
 class MapHashReport:
     files: Tuple[FileHash, ...]
     tree_sha256: str
+
+
+_RUNTIME_NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+_SPATIAL_MAP_PATTERN = re.compile(
+    r"SPATIAL_MAP\s+active=(\d+)\s+pending=(\d+)\s+core=([01])"
+    r"(?:\s+load_seq=(\d+))?\s+"
+    r"load_ms=(" + _RUNTIME_NUMBER + r")\s+"
+    r"match_ms=(" + _RUNTIME_NUMBER + r")\s+"
+    r"frame_ms=(" + _RUNTIME_NUMBER + r")\s+"
+    r"memory_mb=(" + _RUNTIME_NUMBER + r")"
+)
+
+
+def _percentile_95(values: Sequence[float]) -> float:
+    ordered = sorted(values)
+    index = max(0, math.ceil(0.95 * len(ordered)) - 1)
+    return ordered[index]
+
+
+def evaluate_lines(lines: Iterable[str]) -> SpatialRuntimeMetrics:
+    """Summarize SPATIAL_MAP diagnostics embedded in ROS console logs."""
+    active_blocks: List[int] = []
+    pending_blocks: List[int] = []
+    core_ready: List[int] = []
+    load_ms: List[float] = []
+    match_ms: List[float] = []
+    frame_ms: List[float] = []
+    memory_mb: List[float] = []
+    seen_load_sequences = set()
+    for line in lines:
+        match = _SPATIAL_MAP_PATTERN.search(line)
+        if match is None:
+            continue
+        values = match.groups()
+        active_blocks.append(int(values[0]))
+        pending_blocks.append(int(values[1]))
+        core_ready.append(int(values[2]))
+        load_sequence = values[3]
+        if load_sequence is None:
+            load_ms.append(float(values[4]))
+        else:
+            sequence = int(load_sequence)
+            if sequence > 0 and sequence not in seen_load_sequences:
+                seen_load_sequences.add(sequence)
+                load_ms.append(float(values[4]))
+        match_ms.append(float(values[5]))
+        frame_ms.append(float(values[6]))
+        memory_mb.append(float(values[7]))
+    if not active_blocks:
+        raise ValueError("runtime log contains no SPATIAL_MAP samples")
+
+    def mean(values: Sequence[float]) -> float:
+        return sum(values) / float(len(values))
+
+    return SpatialRuntimeMetrics(
+        samples=len(active_blocks),
+        spatial_active_blocks_max=max(active_blocks),
+        spatial_pending_blocks_max=max(pending_blocks),
+        spatial_core_ready_ratio=mean(core_ready),
+        spatial_load_ms_mean=mean(load_ms) if load_ms else 0.0,
+        spatial_load_ms_p95=_percentile_95(load_ms) if load_ms else 0.0,
+        spatial_load_ms_max=max(load_ms) if load_ms else 0.0,
+        spatial_match_ms_mean=mean(match_ms),
+        spatial_match_ms_p95=_percentile_95(match_ms),
+        spatial_match_ms_max=max(match_ms),
+        frame_ms_mean=mean(frame_ms),
+        frame_ms_p95=_percentile_95(frame_ms),
+        frame_ms_max=max(frame_ms),
+        memory_mb_peak=max(memory_mb),
+    )
 
 
 def _normalize_quaternion(quaternion: Quaternion) -> Quaternion:
@@ -294,6 +383,11 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference", required=True, type=pathlib.Path)
     parser.add_argument("--map-dir", required=True, type=pathlib.Path)
     parser.add_argument(
+        "--runtime-log",
+        type=pathlib.Path,
+        help="optional ROS console log containing SPATIAL_MAP samples",
+    )
+    parser.add_argument(
         "--max-time-diff",
         type=float,
         default=0.02,
@@ -319,6 +413,10 @@ def main(arguments: Sequence[str] = None) -> int:
         )
         metrics = compute_metrics(matches, rpe_delta=options.rpe_delta)
         map_hashes = hash_map_directory(options.map_dir)
+        runtime_metrics = None
+        if options.runtime_log is not None:
+            with options.runtime_log.open("r", encoding="utf-8") as stream:
+                runtime_metrics = evaluate_lines(stream)
     except (OSError, ValueError) as exception:
         parser.error(str(exception))
 
@@ -339,6 +437,33 @@ def main(arguments: Sequence[str] = None) -> int:
     for file_hash in map_hashes.files:
         print("  {}  {}".format(file_hash.sha256, file_hash.relative_path))
     print("map_tree_sha256: {}".format(map_hashes.tree_sha256))
+    if runtime_metrics is not None:
+        print("spatial_runtime_samples: {}".format(runtime_metrics.samples))
+        print("spatial_active_blocks_max: {}".format(
+            runtime_metrics.spatial_active_blocks_max
+        ))
+        print("spatial_pending_blocks_max: {}".format(
+            runtime_metrics.spatial_pending_blocks_max
+        ))
+        print("spatial_core_ready_ratio: {:.6f}".format(
+            runtime_metrics.spatial_core_ready_ratio
+        ))
+        for prefix, mean_value, p95_value, max_value in (
+            ("spatial_load_ms", runtime_metrics.spatial_load_ms_mean,
+             runtime_metrics.spatial_load_ms_p95,
+             runtime_metrics.spatial_load_ms_max),
+            ("spatial_match_ms", runtime_metrics.spatial_match_ms_mean,
+             runtime_metrics.spatial_match_ms_p95,
+             runtime_metrics.spatial_match_ms_max),
+            ("frame_ms", runtime_metrics.frame_ms_mean,
+             runtime_metrics.frame_ms_p95, runtime_metrics.frame_ms_max),
+        ):
+            print("{}_mean: {:.6f}".format(prefix, mean_value))
+            print("{}_p95: {:.6f}".format(prefix, p95_value))
+            print("{}_max: {:.6f}".format(prefix, max_value))
+        print("memory_mb_peak: {:.6f}".format(
+            runtime_metrics.memory_mb_peak
+        ))
     return 0
 
 

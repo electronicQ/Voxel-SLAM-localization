@@ -150,10 +150,12 @@ TEST(SpatialMapManager, ReportsLoadFailureWithoutPublishingCorruptBlock) {
   EXPECT_FALSE(status.core_ready);
   EXPECT_EQ(manager.snapshot()->blocks.count(BlockIndex(0, 0, 0)), 0U);
   EXPECT_GT(status.failed_core_block_count, 0U);
+  const std::uint64_t failed_load_sequence = status.load_sequence;
   ASSERT_TRUE(manager.request(Eigen::Vector3d::Zero(),
                               Eigen::Vector3d::Zero(), generation));
   ASSERT_TRUE(manager.wait_until_idle(kTimeout));
   EXPECT_EQ(source->load_count(BlockIndex(0, 0, 0)), 1);
+  EXPECT_EQ(manager.status().load_sequence, failed_load_sequence);
 }
 
 TEST(SpatialMapManager, ConcurrentSnapshotsRemainImmutable) {

@@ -170,7 +170,7 @@ rosbag play jungle_challenge.bag --pause
 
 #### 4.5.1 导出定位地图
 
-在建图配置中保持 `General/mode: mapping`，并在 `VoxelSLAM/config/mid360.yaml` 中设置 `General/map_export_path`。目标目录必须尚不存在，但其父目录必须已经存在。
+在建图配置中保持 `General/mode: mapping`，并在 `VoxelSLAM/config/mid360.yaml` 中设置 `General/map_export_path`。目标目录必须尚不存在，但其父目录必须已经存在。`MapBlock` 配置决定定位地图的固定空间划分：默认块尺寸为 20 m × 20 m × 10 m，块内融合分辨率为 0.1 m，根体素边长为 1 m，静态八叉树最大层数为 2。
 
 正常运行建图，然后触发最终全局优化和地图导出：
 
@@ -180,9 +180,32 @@ rosbag play mapping.bag --pause
 rosparam set finish true
 ```
 
-导出的地图包包含优化后的关键帧位姿、关键帧局部坐标系点云、BTC 描述子和 BTC 平面点云。程序仅在最终优化完成后以事务方式写入地图包，避免留下不完整目录。
+程序仅在最终优化完成后以事务方式写入 v2 地图包，避免留下不完整目录。主要内容如下：
 
-#### 4.5.2 启动地图定位
+- `manifest.yaml`：格式版本、坐标系、BTC 指纹、关键帧数量和不可修改的空间块参数；
+- `keyframes.csv` 与 `keyframes/`：BTC 范围筛选、最近高度查询和兼容数据；
+- `btc_frames.bin` 与 `btc_planes/`：BTC 重定位数据库；
+- `spatial_blocks.idx`：非空空间块的哈希索引、包围盒、偏移、长度和校验信息；
+- `spatial_blocks.bin`：融合后的不可变空间块、根体素、静态八叉树节点和平面数据。
+
+定位不会遍历全部历史关键帧，也不会重建整张局部体素地图。它只枚举当前位置和预测位置附近的规则块坐标，通过索引进行平均常数时间查找，在后台加载缺失块，并以不可变快照供一次完整 IESKF 更新使用。
+
+#### 4.5.2 将旧 v1 地图转换为 v2
+
+定位程序只接受 v2 地图。已有 v1 地图可在 Ubuntu 编译完成后转换：
+
+```bash
+rosrun voxel_slam build_spatial_map \
+  --input /absolute/path/to/v1_map \
+  --output /absolute/path/to/v2_map \
+  --size-x 20 --size-y 20 --size-z 10 \
+  --fusion-leaf 0.1 --root-voxel 1.0 \
+  --max-layer 2 --min-eigen 0.0025
+```
+
+输入目录和输出目录不能相同、不能互相嵌套，输出目录也不能预先存在。转换程序完成写入后会重新读取索引并校验全部空间块；校验失败时不会保留不完整的 v2 输出。
+
+#### 4.5.3 启动地图定位
 
 可以在 `VoxelSLAM/config/localization_mid360.yaml` 中设置 `Localization/map_path`，也可以通过 launch 参数传入地图路径：
 
@@ -192,30 +215,42 @@ roslaunch voxel_slam vxlm_localization_mid360.launch \
 rosbag play localization.bag --pause
 ```
 
+`Localization/spatial_map` 只控制运行时策略：
+
+- `preload_radius`：重定位后必须先加载完成的核心半径；
+- `load_radius`：当前位置及预测位置周围的目标加载半径；
+- `unload_radius`：卸载滞回半径，必须大于 `load_radius`；
+- `prefetch_time_sec`：使用当前速度预测前方加载中心的时间；
+- `map_gap_timeout_sec`：核心块持续未就绪时允许仅 IMU 传播的最长时间；
+- `preload_timeout_sec`：首次局部地图准备超时；
+- `max_background_loads`：并行磁盘加载线程数。
+
+块尺寸、融合分辨率、根体素尺寸、八叉树层数和平面阈值必须以 `manifest.yaml` 为准，定位 YAML 不能覆盖这些格式参数。
+
 当 `use_prior_pose_for_btc: true` 时，BTC 仅从 `btc_prior_pose.x/y` 周围 `btc_search_radius` 范围内的历史关键帧中选择候选。匹配失败后，搜索半径会逐步扩大到 `btc_max_search_radius`，随后可根据配置回退到全局搜索。候选筛选有意不使用 yaw 约束。
 
 当 `use_prior_pose_for_btc: false` 时，先验位置以及半径、扩展和回退设置均不参与候选筛选，BTC 会直接进行全局搜索。
 
-#### 4.5.3 使用 RViz 设置初始位姿
+#### 4.5.4 使用 RViz 设置初始位姿
 
 当 `rviz_initialpose_enabled` 为 `true` 时，RViz 的 **2D Pose Estimate** 始终是一条独立的初始化路径：
 
 - x、y 和 yaw 取自 RViz 输入，表示车辆当前在 `map` 坐标系中的位姿。
 - roll 和 pitch 取自实时 IMU 姿态。
 - z 取自 XY 平面内距离输入位置最近的历史关键帧高度。
-- 该路径跳过 BTC，但只有在连续 `direct_pose_validation_scans` 帧通过局部历史地图匹配验证后，定位才会生效。
+- 该路径跳过 BTC，但必须先加载输入位姿附近的核心空间块，并在连续 `direct_pose_validation_scans` 帧通过静态局部地图匹配验证后，定位才会生效。
 - 新的 RViz 位姿请求会替换尚未完成的旧请求。
 
-#### 4.5.4 定位状态与自动恢复
+#### 4.5.5 定位状态与自动恢复
 
 程序发布以下锁存状态话题：
 
-- `/localization/state`（`std_msgs/String`）：可能为 `WAITING_FOR_MAP`、`LOCAL_ODOMETRY`、`RELOCALIZING`、`ALIGNING`、`IN_MAP_TRACKING` 或 `LOST`。
+- `/localization/state`（`std_msgs/String`）：可能为 `WAITING_FOR_MAP`、`LOCAL_ODOMETRY`、`RELOCALIZING`、`ALIGNING`、`PREPARING_LOCAL_MAP`、`IN_MAP_TRACKING` 或 `LOST`。
 - `/localization/valid`（`std_msgs/Bool`）：只有 BTC 对齐成功或 RViz 初始位姿通过局部地图验证后才为 `true`。
 
-当坏帧数量达到配置阈值，或求解结果出现非有限数值时，系统会进入 `LOST` 状态。系统只清理当前会话状态，并自动返回局部里程计和 BTC 恢复流程；已经加载的地图、历史 BTC 数据库和关键帧索引保持不变。
+`PREPARING_LOCAL_MAP` 表示全局位姿已经应用，但核心空间块尚未全部就绪，或者 RViz 位姿仍在连续扫描验证中。核心块加载期间只进行 IMU 传播，不把当前扫描插入静态地图。连续跟踪时若车辆进入尚未加载的区域，系统先回滚本帧激光更新并等待后台加载；缺口持续超过阈值、核心块损坏、坏帧达到阈值或求解出现非有限数值时进入 `LOST`。系统随后清理当前 Session 并返回局部里程计和 BTC 恢复流程，磁盘地图和历史 BTC 数据不变。
 
-#### 4.5.5 定位结果评估
+#### 4.5.6 定位结果与实时性评估
 
 使用以下命令，将 TUM 格式的估计轨迹与地图坐标系下的 TUM 真值轨迹进行比较，并检查定位过程中地图包是否发生变化：
 
@@ -223,7 +258,8 @@ rosbag play localization.bag --pause
 python3 VoxelSLAM/scripts/evaluate_localization.py \
   --estimate estimate.tum \
   --reference reference.tum \
-  --map-dir /absolute/path/to/map_package
+  --map-dir /absolute/path/to/map_package \
+  --runtime-log spatial_runtime.log
 ```
 
 评估工具输出以下结果：
@@ -232,8 +268,32 @@ python3 VoxelSLAM/scripts/evaluate_localization.py \
 - 平移 RPE 和旋转 RPE。
 - 地图包中每个文件的 SHA-256。
 - 与路径相关且结果确定的整目录 SHA-256。
+- 活动块数和待加载块数峰值、核心块就绪比例。
+- 单块加载、静态地图匹配和整帧处理耗时的平均值、P95 与最大值。
+- 已加载静态空间块数据的估算内存峰值。
 
-建议在定位前后分别运行一次评估工具，两次输出的所有地图哈希值必须完全一致。
+定位时程序会输出形如 `SPATIAL_MAP active=...` 的诊断行，可用 `roslaunch ... 2>&1 | tee spatial_runtime.log` 保存。论文实验至少应记录加载耗时、匹配耗时、整帧耗时的平均值、P95、最大值，以及内存峰值。建议在定位前后分别运行一次评估工具，两次输出的所有地图哈希值必须完全一致。
+
+#### 4.5.7 Ubuntu 验证与 Windows 可执行检查
+
+完整构建和 C++ 测试必须在安装 ROS Noetic、PCL、GTSAM 和 Livox 驱动的 Ubuntu 20.04 环境中执行：
+
+```bash
+cd ~/catkin_ws
+catkin_make
+catkin_make run_tests
+catkin_test_results
+python3 -m unittest VoxelSLAM/test/evaluate_localization_test.py
+```
+
+随后分别使用建图 rosbag 导出 v2 地图、使用定位 rosbag 验证 BTC 和 RViz 两条初始化路径，并检查 `/localization/state`、`/localization/valid`、轨迹误差、实时性日志和地图哈希。
+
+Windows 当前只能执行不依赖 ROS/PCL/GTSAM 的检查，不能代替 Ubuntu 编译和 rosbag 集成测试：
+
+```powershell
+python -m unittest VoxelSLAM/test/evaluate_localization_test.py
+git diff --check
+```
 
 ### 4.6 其他类型激光雷达
 

@@ -2546,6 +2546,8 @@ public:
                           << diagnostic_status.pending_block_count
                           << " core="
                           << (diagnostic_status.core_ready ? 1 : 0)
+                          << " load_seq="
+                          << diagnostic_status.load_sequence
                           << " load_ms="
                           << diagnostic_status.last_load_ms
                           << " match_ms=" << spatial_match_ms

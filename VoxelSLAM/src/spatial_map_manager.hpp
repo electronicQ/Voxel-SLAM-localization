@@ -45,6 +45,7 @@ struct SpatialMapStatus {
   std::size_t pending_block_count = 0U;
   std::size_t failed_block_count = 0U;
   std::size_t failed_core_block_count = 0U;
+  std::uint64_t load_sequence = 0U;
   double last_load_ms = 0.0;
   std::string last_error;
 };
@@ -107,6 +108,7 @@ class SpatialMapManager {
   bool stop_ = false;
   std::size_t active_loads_ = 0U;
   std::uint64_t generation_ = 0U;
+  std::uint64_t load_sequence_ = 0U;
   std::deque<LoadRequest> queue_;
   std::unordered_set<BlockIndex, BlockIndexHash> queued_;
   std::unordered_map<BlockIndex, std::uint64_t, BlockIndexHash>

@@ -118,6 +118,7 @@ std::uint64_t SpatialMapManager::begin_session() {
   staging_.clear();
   status_ = SpatialMapStatus();
   status_.generation = generation_;
+  status_.load_sequence = load_sequence_;
   publish_locked();
   update_status_locked();
   idle_cv_.notify_all();
@@ -327,6 +328,11 @@ void SpatialMapManager::worker_loop() {
       }
       if (request.generation == generation_ &&
           desired_.count(request.index) != 0U) {
+        if (load_sequence_ !=
+            std::numeric_limits<std::uint64_t>::max()) {
+          ++load_sequence_;
+        }
+        status_.load_sequence = load_sequence_;
         status_.last_load_ms = load_ms;
         if (success) {
           staging_[request.index] = std::move(immutable);
