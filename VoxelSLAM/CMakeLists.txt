@@ -64,6 +64,7 @@ add_library(voxel_slam_map_io
   src/session_aligner.cpp
   src/global_correction.cpp
   src/localization_state.cpp
+  src/imu_rate_predictor.cpp
 )
 target_include_directories(voxel_slam_map_io PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -96,6 +97,16 @@ install(TARGETS build_spatial_map
 )
 
 if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(imu_rate_predictor_test
+    test/imu_rate_predictor_test.cpp
+  )
+  if(TARGET imu_rate_predictor_test)
+    target_link_libraries(imu_rate_predictor_test
+      voxel_slam_map_io
+      ${catkin_LIBRARIES}
+    )
+  endif()
+
   catkin_add_gtest(spatial_map_manager_test
     test/spatial_map_manager_test.cpp
   )
