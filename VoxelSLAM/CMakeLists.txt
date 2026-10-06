@@ -54,6 +54,7 @@ add_library(voxel_slam_map_io
   src/spatial_map_types.cpp
   src/spatial_map_builder.cpp
   src/spatial_map_matcher.cpp
+  src/spatial_map_io.cpp
   src/map_package.cpp
   src/btc_io.cpp
   src/mapping_capture.cpp
@@ -82,6 +83,17 @@ target_link_libraries(voxelslam
 )
 
 if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(spatial_map_io_test
+    test/spatial_map_io_test.cpp
+  )
+  if(TARGET spatial_map_io_test)
+    target_link_libraries(spatial_map_io_test
+      voxel_slam_map_io
+      ${catkin_LIBRARIES}
+      ${Boost_LIBRARIES}
+    )
+  endif()
+
   catkin_add_gtest(spatial_map_builder_test
     test/spatial_map_builder_test.cpp
   )
