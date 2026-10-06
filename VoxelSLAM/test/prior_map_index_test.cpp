@@ -89,7 +89,6 @@ TEST(PriorMapTracker, UsesExplicitIdsAndIgnoresHeightForXyQueries) {
   EXPECT_EQ(id, 7);
   EXPECT_DOUBLE_EQ(height, -20.0);
 
-  tracker.reset_runtime_cache();
   EXPECT_EQ(tracker.radius_search_xy(Eigen::Vector2d::Zero(), 1.1), ids);
   EXPECT_EQ(fingerprint(map), before);
 }

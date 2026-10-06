@@ -837,7 +837,6 @@ public:
   double local_map_prepare_started_sec = 0.0;
   double map_gap_started_sec = -1.0;
   PriorMapTracker prior_map_tracker;
-  mutex historical_map_mutex;
   std::atomic<bool> prior_map_ready{false};
   std::atomic<bool> localization_valid{false};
   mutex frontend_pipeline_mutex;
@@ -850,10 +849,6 @@ public:
   int tracking_min_matched_points = 50;
   double tracking_max_mean_abs_point_plane = 0.5;
   double tracking_min_normal_eigenvalue = 14.0;
-  double local_map_load_radius = 30.0;
-  double local_map_unload_radius = 40.0;
-  int local_map_max_load_per_scan = 1;
-  int local_map_preload_limit = 20;
   TrackingQuality last_tracking_quality;
   ros::Subscriber sub_initialpose;
   InitialPoseRequestBuffer initial_pose_requests;
@@ -894,14 +889,6 @@ public:
     n.param<string>("General/mode", operation_mode, "mapping");
     n.param<string>("General/map_export_path", map_export_path, "");
     n.param<string>("Localization/map_path", localization_map_path, "");
-    n.param<double>("Localization/local_map_load_radius",
-                    local_map_load_radius, 30.0);
-    n.param<double>("Localization/local_map_unload_radius",
-                    local_map_unload_radius, 40.0);
-    n.param<int>("Localization/local_map_max_load_per_scan",
-                 local_map_max_load_per_scan, 1);
-    n.param<int>("Localization/local_map_preload_limit",
-                 local_map_preload_limit, 20);
     n.param<double>("Localization/spatial_map/preload_radius",
                     spatial_runtime_config.preload_radius, 15.0);
     n.param<double>("Localization/spatial_map/load_radius",
@@ -985,10 +972,7 @@ public:
           "map_export_path is only valid in mapping mode");
     }
     if(operation_mode == "localization" &&
-       (local_map_load_radius <= 0.0 ||
-        local_map_unload_radius < local_map_load_radius ||
-        local_map_max_load_per_scan < 0 || local_map_preload_limit <= 0 ||
-        direct_pose_validation_scans <= 0 ||
+       (direct_pose_validation_scans <= 0 ||
         direct_pose_validation_timeout_sec <= 0.0 ||
         lost_bad_scan_limit <= 0 || btc_search_radius <= 0.0 ||
         tracking_min_matched_points <= 0 ||
@@ -1006,7 +990,7 @@ public:
         !std::isfinite(alignment_max_translation_m) ||
         !std::isfinite(alignment_max_rotation_deg)))
     {
-      ROS_FATAL("Localization map-cache or direct-validation settings are invalid.");
+      ROS_FATAL("Localization or direct-validation settings are invalid.");
       throw std::invalid_argument("invalid localization settings");
     }
     string spatial_config_error;
@@ -1211,95 +1195,8 @@ public:
     map.clear();
   }
 
-  bool install_historical_cache(const PriorMapCacheUpdate &update,
-                                string &error)
+  void reset_spatial_map_session()
   {
-    error.clear();
-    if(!update.world_cloud || update.world_cloud->empty())
-    {
-      error = "historical local-map cache is empty";
-      return false;
-    }
-
-    unordered_map<VOXEL_LOC, OctoTree*> candidate_map;
-    try
-    {
-      PVec points;
-      points.reserve(update.world_cloud->size());
-      for(const PointType &point: update.world_cloud->points)
-      {
-        pointVar value;
-        value.pnt << point.x, point.y, point.z;
-        value.var = Eigen::Vector3d(point.normal_x, point.normal_y,
-                                    point.normal_z).asDiagonal();
-        if(!value.pnt.array().isFinite().all() ||
-           !value.var.array().isFinite().all())
-        {
-          error = "historical local-map cache contains a non-finite point";
-          release_voxel_map(candidate_map);
-          return false;
-        }
-        points.push_back(value);
-      }
-
-      cut_voxel(candidate_map, points, win_size, 0.0);
-      for(auto &entry: candidate_map)
-      {
-        if(entry.second != nullptr)
-          entry.second->finalize_fixed();
-      }
-
-      surf_map_slide.clear();
-      surf_map.swap(candidate_map);
-      release_voxel_map(candidate_map);
-      return true;
-    }
-    catch(const std::bad_alloc &)
-    {
-      error = "out of memory while building the historical local map";
-    }
-    catch(const std::exception &exception)
-    {
-      error = string("failed to build the historical local map: ") +
-              exception.what();
-    }
-    catch(...)
-    {
-      error = "unknown failure while building the historical local map";
-    }
-    release_voxel_map(candidate_map);
-    return false;
-  }
-
-  bool rebuild_historical_local_map(const Eigen::Vector3d &center,
-                                    string &error)
-  {
-    lock_guard<mutex> lock(historical_map_mutex);
-    PriorMapCacheUpdate update;
-    if(!prior_map_tracker.rebuild_local_map(
-           center, local_map_load_radius, local_map_preload_limit,
-           update, error))
-      return false;
-    return install_historical_cache(update, error);
-  }
-
-  bool update_historical_local_map(string &error)
-  {
-    lock_guard<mutex> lock(historical_map_mutex);
-    PriorMapCacheUpdate update;
-    if(!prior_map_tracker.update_loaded_keyframes(
-           x_curr.p, local_map_load_radius, local_map_unload_radius,
-           local_map_max_load_per_scan, update, error))
-      return false;
-    if(update.loaded_ids.empty() && update.unloaded_ids.empty())
-      return true;
-    return install_historical_cache(update, error);
-  }
-
-  void reset_historical_runtime_cache()
-  {
-    lock_guard<mutex> lock(historical_map_mutex);
-    prior_map_tracker.reset_runtime_cache();
     if(spatial_map_manager)
     {
       spatial_map_generation = spatial_map_manager->begin_session();
@@ -1433,7 +1330,7 @@ public:
     if(!correction_succeeded)
     {
       handled_direct_generation = request.generation;
-      reset_historical_runtime_cache();
+      reset_spatial_map_session();
       handle_localization_event(LocalizationEvent::DIRECT_POSE_FAILED);
       return -1;
     }
@@ -1442,7 +1339,7 @@ public:
             LocalizationEvent::ALIGNMENT_APPLIED).accepted)
     {
       handled_direct_generation = request.generation;
-      reset_historical_runtime_cache();
+      reset_spatial_map_session();
       handle_localization_event(LocalizationEvent::DIRECT_POSE_FAILED);
       if(error.empty())
         error = "localization state rejected spatial-map preparation";
@@ -2292,7 +2189,7 @@ public:
                           << direct_pose_error);
           direct_validation_active = false;
           active_direct_generation = 0;
-          reset_historical_runtime_cache();
+          reset_spatial_map_session();
           system_reset(imus);
           motion_init_flag = 1;
           reset_flag = 1;
@@ -2357,11 +2254,17 @@ public:
             }
             direct_validation_active = false;
             active_direct_generation = 0;
-            reset_historical_runtime_cache();
+            reset_spatial_map_session();
             system_reset(imus);
             motion_init_flag = 1;
             reset_flag = 1;
             continue;
+          }
+          if(map_status.failed_block_count > 0U)
+          {
+            ROS_WARN_STREAM_THROTTLE(
+                2.0, "Non-core spatial map block is unavailable for this "
+                     "session: " << map_status.last_error);
           }
           if(current_localization_state ==
                  LocalizationState::PREPARING_LOCAL_MAP &&
@@ -2393,7 +2296,7 @@ public:
               handle_localization_event(LocalizationEvent::LOCAL_MAP_FAILED);
               direct_validation_active = false;
               active_direct_generation = 0;
-              reset_historical_runtime_cache();
+              reset_spatial_map_session();
               system_reset(imus);
               motion_init_flag = 1;
               reset_flag = 1;
@@ -2449,7 +2352,7 @@ public:
               {
                 direct_validation_active = false;
                 active_direct_generation = 0;
-                reset_historical_runtime_cache();
+                reset_spatial_map_session();
                 system_reset(imus);
                 motion_init_flag = 1;
                 reset_flag = 1;
@@ -2500,7 +2403,7 @@ public:
               active_direct_generation = 0;
               handle_localization_event(
                   LocalizationEvent::DIRECT_POSE_FAILED);
-              reset_historical_runtime_cache();
+              reset_spatial_map_session();
               system_reset(imus);
               motion_init_flag = 1;
               reset_flag = 1;
@@ -2523,7 +2426,7 @@ public:
               ROS_WARN("Localization entered LOST; clearing current-session state.");
               active_direct_generation = 0;
               direct_validation_active = false;
-              reset_historical_runtime_cache();
+              reset_spatial_map_session();
               system_reset(imus);
               motion_init_flag = 1;
               reset_flag = 1;
@@ -3009,7 +2912,7 @@ public:
           if(localization_state_snapshot() == LocalizationState::ALIGNING &&
              alignment_source_snapshot() == AlignmentSource::BTC)
             handle_localization_event(LocalizationEvent::BTC_FAILED);
-          reset_historical_runtime_cache();
+          reset_spatial_map_session();
           frontend_reset_requested.store(true);
         }
       }

@@ -632,6 +632,22 @@ TEST(SpatialMapIO, FailedSavePreservesExistingPublishedPairAndOutput) {
   EXPECT_EQ(read_bytes(temp.index_path()), index_before);
   EXPECT_EQ(read_bytes(temp.data_path()), data_before);
   EXPECT_EQ(output.entries[0].index, BlockIndex(9, 8, 7));
+
+  invalid = two_block_fixture();
+  invalid[0].planes[0].normal *= 2.0;
+  EXPECT_FALSE(SpatialMapIO::save(temp.path(), invalid, test_config(), output,
+                                  error));
+  EXPECT_NE(error.find("non-unit"), std::string::npos) << error;
+  EXPECT_EQ(read_bytes(temp.index_path()), index_before);
+  EXPECT_EQ(read_bytes(temp.data_path()), data_before);
+
+  invalid = two_block_fixture();
+  invalid[0].planes[0].covariance(0, 1) += 0.5;
+  EXPECT_FALSE(SpatialMapIO::save(temp.path(), invalid, test_config(), output,
+                                  error));
+  EXPECT_NE(error.find("asymmetric"), std::string::npos) << error;
+  EXPECT_EQ(read_bytes(temp.index_path()), index_before);
+  EXPECT_EQ(read_bytes(temp.data_path()), data_before);
 }
 
 }  // namespace

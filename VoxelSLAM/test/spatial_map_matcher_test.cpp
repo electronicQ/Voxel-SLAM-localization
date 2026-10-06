@@ -267,6 +267,13 @@ TEST(StaticMapMatcher, RejectsNonFiniteInputsAndNonPositiveSigma) {
       result.blocks[0],
       Eigen::Vector3d(std::numeric_limits<double>::quiet_NaN(), 0.25, 0.05),
       Eigen::Matrix3d::Identity(), nullptr, match));
+
+  StaticMapBlock non_unit_normal = result.blocks[0];
+  ASSERT_FALSE(non_unit_normal.planes.empty());
+  non_unit_normal.planes[0].normal *= 2.0;
+  EXPECT_FALSE(matcher.match(non_unit_normal, query,
+                             Eigen::Matrix3d::Identity() * 1e-4, nullptr,
+                             match));
 }
 
 TEST(StaticMapMatcher, RejectsReachableOutOfRangeSerializedIndices) {

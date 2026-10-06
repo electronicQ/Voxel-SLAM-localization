@@ -73,12 +73,22 @@ SavedKeyframe makeKeyframe(int id, double stamp, const Eigen::Matrix3d &R,
 
 SavedMap makeTwoKeyframeMap() {
   SavedMap map;
+  std::vector<PointType> first_points{
+      makePoint(0.1F, 0.2F, 0.3F, 4.0F, 1.0F, 0.0F, 0.0F),
+      makePoint(-1.0F, 2.5F, 3.25F, 8.0F, 0.0F, 1.0F, 0.0F)};
+  for (int x = 0; x < 3; ++x) {
+    for (int y = 0; y < 3; ++y) {
+      first_points.push_back(makePoint(
+          0.1F + 0.2F * x, 0.1F + 0.2F * y, 0.3F,
+          static_cast<float>(10 + 3 * x + y),
+          0.001F, 0.001F, 0.001F));
+    }
+  }
   map.keyframes.push_back(makeKeyframe(
       0, 1000.125,
       Eigen::AngleAxisd(0.25, Eigen::Vector3d::UnitZ()).toRotationMatrix(),
       Eigen::Vector3d(1.0, -2.0, 3.5),
-      {makePoint(0.1F, 0.2F, 0.3F, 4.0F, 1.0F, 0.0F, 0.0F),
-       makePoint(-1.0F, 2.5F, 3.25F, 8.0F, 0.0F, 1.0F, 0.0F)}));
+      first_points));
   map.keyframes.push_back(makeKeyframe(
       1, 1001.875,
       Eigen::AngleAxisd(-0.4, Eigen::Vector3d::UnitY()).toRotationMatrix(),
@@ -727,4 +737,42 @@ TEST(MapPackageIO, RejectsNonFiniteOptionsAndConfig) {
   EXPECT_FALSE(
       MapPackageIO::load(load_temp.map_path(), output, bad_config, error));
   EXPECT_NE(error.find("icp_threshold"), std::string::npos) << error;
+}
+
+TEST(MapPackageIO, RejectsPackagesWithoutUsableSpatialBlocks) {
+  TemporaryMapPath temp;
+  SavedMap sparse;
+  sparse.keyframes.push_back(makeKeyframe(
+      0, 1.0, Eigen::Matrix3d::Identity(), Eigen::Vector3d::Zero(),
+      {makePoint(0.0F, 0.0F, 0.0F, 1.0F, 0.001F, 0.001F, 0.001F)}));
+  std::string error;
+  EXPECT_FALSE(MapPackageIO::save(temp.map_path(), sparse, makeOptions(),
+                                  error));
+  EXPECT_NE(error.find("no usable planar blocks"), std::string::npos)
+      << error;
+  EXPECT_FALSE(fs::exists(temp.path()));
+
+  TemporaryMapPath corrupt_temp;
+  const MapPackageOptions options = makeOptions();
+  ASSERT_TRUE(MapPackageIO::save(corrupt_temp.map_path(),
+                                 makeTwoKeyframeMap(), options, error))
+      << error;
+  const std::string manifest =
+      readFile(corrupt_temp.path() / "manifest.yaml");
+  const std::size_t count_begin = manifest.find("spatial_block_count: ");
+  ASSERT_NE(count_begin, std::string::npos);
+  const std::size_t count_end = manifest.find('\n', count_begin);
+  ASSERT_NE(count_end, std::string::npos);
+  writeFile(corrupt_temp.path() / "manifest.yaml",
+            manifest.substr(0, count_begin) + "spatial_block_count: 0" +
+                manifest.substr(count_end));
+  SavedMap output = makeCallerSentinel();
+  const pcl::PointCloud<PointType>::Ptr sentinel_cloud =
+      output.keyframes[0].cloud;
+  EXPECT_FALSE(MapPackageIO::load(corrupt_temp.map_path(), output, options,
+                                  error));
+  EXPECT_NE(error.find("spatial_block_count must be positive"),
+            std::string::npos)
+      << error;
+  expectCallerSentinel(output, sentinel_cloud);
 }

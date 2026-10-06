@@ -94,6 +94,7 @@ bool evaluate_plane(const StaticMapBlock &block,
   if (!vector_is_finite(plane.center) ||
       !vector_is_finite(plane.normal) ||
       !matrix_is_finite(plane.covariance) ||
+      std::abs(plane.normal.norm() - 1.0) > 1e-6 ||
       !std::isfinite(plane.radius) || plane.radius < 0.0) {
     return false;
   }

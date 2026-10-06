@@ -601,6 +601,12 @@ bool validate_block(const StaticMapBlock &block,
               " has invalid plane data";
       return false;
     }
+    if (std::abs(plane.normal.norm() - 1.0) > 1e-6 ||
+        !plane.covariance.isApprox(plane.covariance.transpose(), 1e-9)) {
+      error = "block " + block_label(block.index) +
+              " has a non-unit plane normal or asymmetric covariance";
+      return false;
+    }
   }
 
   for (const SpatialMapPoint &point : block.display_points) {

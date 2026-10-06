@@ -673,8 +673,10 @@ bool validateManifest(const std::map<std::string, std::string> &values,
   }
   spatial_config.save_display_cloud = save_display_cloud != 0;
   if (keyframe_count < 0 || btc_frame_count < 0 ||
-      spatial_block_count < 0) {
-    return fail(error, "manifest counts must be non-negative");
+      spatial_block_count <= 0) {
+    return fail(error,
+                "manifest keyframe/BTC counts must be non-negative and "
+                "spatial_block_count must be positive");
   }
   std::string spatial_error;
   if (!spatial_config.validate(spatial_error)) {
@@ -979,8 +981,15 @@ bool savePackageInternal(const std::string &directory, const SavedMap &map,
       return fail(error, "cannot fingerprint non-finite BTC config");
     }
     SpatialMapBuildResult spatial_result;
-    if (!buildSpatialMap(map, options.spatial_map, spatial_result, error) ||
-        !writeKeyframes(temporary_directory, map, error) ||
+    if (!buildSpatialMap(map, options.spatial_map, spatial_result, error)) {
+      return false;
+    }
+    if (spatial_result.blocks.empty()) {
+      return fail(error,
+                  "spatial map contains no usable planar blocks; adjust "
+                  "MapBlock thresholds or provide denser mapping data");
+    }
+    if (!writeKeyframes(temporary_directory, map, error) ||
         !writeBtcArtifacts(temporary_directory, map, error)) {
       return false;
     }

@@ -9,6 +9,7 @@
 #include <vector>
 
 struct SpatialBlockIndexEntry {
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   BlockIndex index;
   BlockAabb bounds;
   std::uint64_t offset = 0;
@@ -20,9 +21,13 @@ struct SpatialBlockIndexEntry {
   std::uint32_t display_point_count = 0;
 };
 
+using SpatialBlockIndexEntries =
+    std::vector<SpatialBlockIndexEntry,
+                Eigen::aligned_allocator<SpatialBlockIndexEntry>>;
+
 struct SpatialMapCatalog {
   SpatialMapConfig config;
-  std::vector<SpatialBlockIndexEntry> entries;
+  SpatialBlockIndexEntries entries;
   std::unordered_map<BlockIndex, std::size_t, BlockIndexHash> lookup;
 };
 

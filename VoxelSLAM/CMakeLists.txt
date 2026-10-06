@@ -245,17 +245,6 @@ if(CATKIN_ENABLE_TESTING)
     )
   endif()
 
-  catkin_add_gtest(prior_map_loading_test
-    test/prior_map_loading_test.cpp
-  )
-  if(TARGET prior_map_loading_test)
-    target_link_libraries(prior_map_loading_test
-      voxel_slam_map_io
-      ${catkin_LIBRARIES}
-      ${PCL_LIBRARIES}
-    )
-  endif()
-
   catkin_add_gtest(direct_pose_initializer_test
     test/direct_pose_initializer_test.cpp
   )

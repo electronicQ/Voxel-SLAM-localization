@@ -1,5 +1,7 @@
 # Voxel-SLAM地图持久化、全局重定位与只读地图定位实施交接
 
+> **2026-10-06 当前状态：** 本文主体记录的是定位 v1 的设计过程，其中“按历史关键帧加载并重建局部体素地图”的接口和参数已经被后续实现取代。当前开发分支为 `codex/spatial-voxel-blocks`；最新有效设计见 `docs/superpowers/specs/2026-10-06-spatial-voxel-block-map-design.md`，实施计划见 `docs/superpowers/plans/2026-10-06-spatial-voxel-block-map.md`。当前定位连续跟踪使用离线构建的 v2 空间体素块、哈希索引、后台异步加载和不可变快照，不再使用 `rebuild_local_map()`、`update_loaded_keyframes()` 或按关键帧重建 `surf_map`。`PriorMapTracker` 仅保留 BTC 的二维候选范围查询和 RViz 初始位姿的最近高度查询。本文后文涉及旧局部关键帧缓存的内容仅作为 v1 基线与演进记录，不能作为现行接口说明。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: use `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans`，按本文任务顺序实施。不要在没有读完本文和所列源码的情况下直接修改主流程。
 
 **目标：** 在现有Voxel-SLAM基础上增加一套纯LiDAR-IMU的“离线建图地图包 + 无人工初值BTC全局重定位 + GTSAM轨迹对齐 + 历史地图只读IESKF连续定位”模式。
