@@ -19,6 +19,9 @@ TEST(LocalizationStateMachine, RunsBtcAndDirectPoseSuccessPaths) {
   EXPECT_EQ(machine.alignment_source(), AlignmentSource::BTC);
   EXPECT_TRUE(
       machine.handle(LocalizationEvent::ALIGNMENT_APPLIED, warning).accepted);
+  EXPECT_EQ(machine.state(), LocalizationState::PREPARING_LOCAL_MAP);
+  EXPECT_TRUE(
+      machine.handle(LocalizationEvent::LOCAL_MAP_READY, warning).accepted);
   EXPECT_EQ(machine.state(), LocalizationState::IN_MAP_TRACKING);
   EXPECT_TRUE(machine.localization_valid());
 
@@ -27,6 +30,12 @@ TEST(LocalizationStateMachine, RunsBtcAndDirectPoseSuccessPaths) {
   EXPECT_EQ(machine.state(), LocalizationState::ALIGNING);
   EXPECT_EQ(machine.alignment_source(), AlignmentSource::RVIZ_INITIAL_POSE);
   EXPECT_FALSE(machine.localization_valid());
+  EXPECT_TRUE(
+      machine.handle(LocalizationEvent::ALIGNMENT_APPLIED, warning).accepted);
+  EXPECT_EQ(machine.state(), LocalizationState::PREPARING_LOCAL_MAP);
+  EXPECT_TRUE(
+      machine.handle(LocalizationEvent::LOCAL_MAP_READY, warning).accepted);
+  EXPECT_EQ(machine.state(), LocalizationState::PREPARING_LOCAL_MAP);
   EXPECT_TRUE(
       machine.handle(LocalizationEvent::DIRECT_POSE_VALIDATED, warning).accepted);
   EXPECT_EQ(machine.state(), LocalizationState::IN_MAP_TRACKING);
@@ -64,6 +73,8 @@ TEST(LocalizationStateMachine, RequiresFiveConsecutiveBadFramesAndNaNLosesNow) {
   ASSERT_TRUE(machine.handle(LocalizationEvent::BTC_MATCHED, warning).accepted);
   ASSERT_TRUE(
       machine.handle(LocalizationEvent::ALIGNMENT_APPLIED, warning).accepted);
+  ASSERT_TRUE(
+      machine.handle(LocalizationEvent::LOCAL_MAP_READY, warning).accepted);
 
   for (int i = 0; i < 4; ++i) {
     LocalizationTransition transition =
@@ -94,12 +105,61 @@ TEST(LocalizationStateMachine, RequiresFiveConsecutiveBadFramesAndNaNLosesNow) {
   ASSERT_TRUE(machine.handle(LocalizationEvent::BTC_MATCHED, warning).accepted);
   ASSERT_TRUE(
       machine.handle(LocalizationEvent::ALIGNMENT_APPLIED, warning).accepted);
+  ASSERT_TRUE(
+      machine.handle(LocalizationEvent::LOCAL_MAP_READY, warning).accepted);
   LocalizationTransition non_finite =
       machine.handle(LocalizationEvent::TRACKING_NONFINITE, warning);
   EXPECT_TRUE(non_finite.accepted);
   EXPECT_TRUE(non_finite.cleanup_requested);
   EXPECT_EQ(machine.state(), LocalizationState::LOST);
   EXPECT_EQ(machine.cleanup_count(), 2U);
+}
+
+TEST(LocalizationStateMachine, WaitsForSpatialMapBeforeBecomingValid) {
+  LocalizationStateMachine machine(5);
+  std::string warning;
+  ASSERT_TRUE(machine.handle(LocalizationEvent::MAP_LOADED, warning).accepted);
+  ASSERT_TRUE(machine.handle(LocalizationEvent::BTC_STARTED, warning).accepted);
+  ASSERT_TRUE(machine.handle(LocalizationEvent::BTC_MATCHED, warning).accepted);
+  ASSERT_TRUE(
+      machine.handle(LocalizationEvent::ALIGNMENT_APPLIED, warning).accepted);
+  EXPECT_EQ(machine.state(), LocalizationState::PREPARING_LOCAL_MAP);
+  EXPECT_FALSE(machine.localization_valid());
+  ASSERT_TRUE(
+      machine.handle(LocalizationEvent::LOCAL_MAP_READY, warning).accepted);
+  EXPECT_EQ(machine.state(), LocalizationState::IN_MAP_TRACKING);
+  EXPECT_TRUE(machine.localization_valid());
+}
+
+TEST(LocalizationStateMachine, LocalMapFailureCleansUpAndReturnsToOdometry) {
+  LocalizationStateMachine machine(5);
+  std::string warning;
+  ASSERT_TRUE(machine.handle(LocalizationEvent::MAP_LOADED, warning).accepted);
+  ASSERT_TRUE(machine.handle(LocalizationEvent::BTC_STARTED, warning).accepted);
+  ASSERT_TRUE(machine.handle(LocalizationEvent::BTC_MATCHED, warning).accepted);
+  ASSERT_TRUE(
+      machine.handle(LocalizationEvent::ALIGNMENT_APPLIED, warning).accepted);
+  const LocalizationTransition failed =
+      machine.handle(LocalizationEvent::LOCAL_MAP_FAILED, warning);
+  EXPECT_TRUE(failed.accepted);
+  EXPECT_TRUE(failed.cleanup_requested);
+  EXPECT_EQ(machine.state(), LocalizationState::LOCAL_ODOMETRY);
+}
+
+TEST(LocalizationStateMachine, MapGapTimeoutEntersLostImmediately) {
+  LocalizationStateMachine machine(5);
+  std::string warning;
+  ASSERT_TRUE(machine.handle(LocalizationEvent::MAP_LOADED, warning).accepted);
+  ASSERT_TRUE(machine.handle(LocalizationEvent::BTC_STARTED, warning).accepted);
+  ASSERT_TRUE(machine.handle(LocalizationEvent::BTC_MATCHED, warning).accepted);
+  ASSERT_TRUE(
+      machine.handle(LocalizationEvent::ALIGNMENT_APPLIED, warning).accepted);
+  ASSERT_TRUE(
+      machine.handle(LocalizationEvent::LOCAL_MAP_READY, warning).accepted);
+  const LocalizationTransition transition =
+      machine.handle(LocalizationEvent::MAP_GAP_TIMEOUT, warning);
+  EXPECT_EQ(machine.state(), LocalizationState::LOST);
+  EXPECT_TRUE(transition.cleanup_requested);
 }
 
 TEST(LocalizationStateMachine, RejectsIllegalEventsWithoutChangingState) {

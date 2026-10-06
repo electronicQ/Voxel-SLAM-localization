@@ -143,6 +143,7 @@ LocalizationTransition LocalizationStateMachine::reject(
 LocalizationTransition LocalizationStateMachine::enter_lost() {
   state_ = LocalizationState::LOST;
   localization_valid_ = false;
+  local_map_ready_ = false;
   bad_tracking_streak_ = 0;
   ++cleanup_count_;
   LocalizationTransition transition;
@@ -164,6 +165,7 @@ LocalizationTransition LocalizationStateMachine::handle(
       }
       map_loaded_ = true;
       state_ = LocalizationState::LOCAL_ODOMETRY;
+      local_map_ready_ = false;
       return accepted;
 
     case LocalizationEvent::BTC_STARTED:
@@ -172,6 +174,7 @@ LocalizationTransition LocalizationStateMachine::handle(
       }
       state_ = LocalizationState::RELOCALIZING;
       localization_valid_ = false;
+      local_map_ready_ = false;
       alignment_source_ = AlignmentSource::BTC;
       return accepted;
 
@@ -191,18 +194,48 @@ LocalizationTransition LocalizationStateMachine::handle(
       }
       state_ = LocalizationState::LOCAL_ODOMETRY;
       localization_valid_ = false;
+      local_map_ready_ = false;
       bad_tracking_streak_ = 0;
       return accepted;
 
     case LocalizationEvent::ALIGNMENT_APPLIED:
-      if (state_ != LocalizationState::ALIGNING ||
-          alignment_source_ != AlignmentSource::BTC) {
+      if (state_ != LocalizationState::ALIGNING) {
         return reject(warning);
       }
-      state_ = LocalizationState::IN_MAP_TRACKING;
-      localization_valid_ = true;
+      state_ = LocalizationState::PREPARING_LOCAL_MAP;
+      localization_valid_ = false;
+      local_map_ready_ = false;
       bad_tracking_streak_ = 0;
       return accepted;
+
+    case LocalizationEvent::LOCAL_MAP_READY:
+      if (state_ != LocalizationState::PREPARING_LOCAL_MAP) {
+        return reject(warning);
+      }
+      local_map_ready_ = true;
+      if (alignment_source_ == AlignmentSource::BTC) {
+        state_ = LocalizationState::IN_MAP_TRACKING;
+        localization_valid_ = true;
+      }
+      return accepted;
+
+    case LocalizationEvent::LOCAL_MAP_FAILED:
+      if (state_ != LocalizationState::PREPARING_LOCAL_MAP) {
+        return reject(warning);
+      }
+      state_ = LocalizationState::LOCAL_ODOMETRY;
+      localization_valid_ = false;
+      local_map_ready_ = false;
+      bad_tracking_streak_ = 0;
+      ++cleanup_count_;
+      accepted.cleanup_requested = true;
+      return accepted;
+
+    case LocalizationEvent::MAP_GAP_TIMEOUT:
+      if (state_ != LocalizationState::IN_MAP_TRACKING) {
+        return reject(warning);
+      }
+      return enter_lost();
 
     case LocalizationEvent::DIRECT_POSE_STARTED:
       if (!map_loaded_ || state_ == LocalizationState::WAITING_FOR_MAP) {
@@ -211,26 +244,31 @@ LocalizationTransition LocalizationStateMachine::handle(
       state_ = LocalizationState::ALIGNING;
       alignment_source_ = AlignmentSource::RVIZ_INITIAL_POSE;
       localization_valid_ = false;
+      local_map_ready_ = false;
       bad_tracking_streak_ = 0;
       return accepted;
 
     case LocalizationEvent::DIRECT_POSE_VALIDATED:
-      if (state_ != LocalizationState::ALIGNING ||
-          alignment_source_ != AlignmentSource::RVIZ_INITIAL_POSE) {
+      if (state_ != LocalizationState::PREPARING_LOCAL_MAP ||
+          alignment_source_ != AlignmentSource::RVIZ_INITIAL_POSE ||
+          !local_map_ready_) {
         return reject(warning);
       }
       state_ = LocalizationState::IN_MAP_TRACKING;
       localization_valid_ = true;
+      local_map_ready_ = true;
       bad_tracking_streak_ = 0;
       return accepted;
 
     case LocalizationEvent::DIRECT_POSE_FAILED:
-      if (state_ != LocalizationState::ALIGNING ||
+      if ((state_ != LocalizationState::ALIGNING &&
+           state_ != LocalizationState::PREPARING_LOCAL_MAP) ||
           alignment_source_ != AlignmentSource::RVIZ_INITIAL_POSE) {
         return reject(warning);
       }
       state_ = LocalizationState::LOCAL_ODOMETRY;
       localization_valid_ = false;
+      local_map_ready_ = false;
       bad_tracking_streak_ = 0;
       ++cleanup_count_;
       accepted.cleanup_requested = true;
@@ -265,6 +303,7 @@ LocalizationTransition LocalizationStateMachine::handle(
       }
       state_ = LocalizationState::LOCAL_ODOMETRY;
       localization_valid_ = false;
+      local_map_ready_ = false;
       bad_tracking_streak_ = 0;
       return accepted;
   }
@@ -301,6 +340,8 @@ const char *localization_state_name(LocalizationState state) {
       return "RELOCALIZING";
     case LocalizationState::ALIGNING:
       return "ALIGNING";
+    case LocalizationState::PREPARING_LOCAL_MAP:
+      return "PREPARING_LOCAL_MAP";
     case LocalizationState::IN_MAP_TRACKING:
       return "IN_MAP_TRACKING";
     case LocalizationState::LOST:

@@ -54,6 +54,7 @@ enum class LocalizationState {
   LOCAL_ODOMETRY,
   RELOCALIZING,
   ALIGNING,
+  PREPARING_LOCAL_MAP,
   IN_MAP_TRACKING,
   LOST
 };
@@ -66,6 +67,9 @@ enum class LocalizationEvent {
   BTC_MATCHED,
   BTC_FAILED,
   ALIGNMENT_APPLIED,
+  LOCAL_MAP_READY,
+  LOCAL_MAP_FAILED,
+  MAP_GAP_TIMEOUT,
   DIRECT_POSE_STARTED,
   DIRECT_POSE_VALIDATED,
   DIRECT_POSE_FAILED,
@@ -101,6 +105,7 @@ class LocalizationStateMachine {
   AlignmentSource alignment_source_ = AlignmentSource::BTC;
   bool map_loaded_ = false;
   bool localization_valid_ = false;
+  bool local_map_ready_ = false;
   int bad_tracking_streak_ = 0;
   int bad_tracking_limit_ = 5;
   std::uint64_t cleanup_count_ = 0;
