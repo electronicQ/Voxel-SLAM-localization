@@ -52,15 +52,21 @@ void ImuRatePredictor::setEnabled(bool enabled) {
 
 void ImuRatePredictor::setMaxPredictionSec(double seconds) {
   std::lock_guard<std::mutex> lock(mutex_);
-  max_prediction_sec_ =
-      std::isfinite(seconds) && seconds >= 0.0 ? seconds : 0.0;
+  if (!std::isfinite(seconds) || seconds <= 0.0) {
+    return;
+  }
+  max_prediction_sec_ = seconds;
 }
 
 void ImuRatePredictor::updateSnapshot(const IMUST &posterior,
                                       double acceleration_scale) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!isFinite(posterior) || !std::isfinite(acceleration_scale)) {
-    clearStateLocked();
+    return;
+  }
+  if (has_replay_coverage_boundary_ &&
+      posterior.t < replay_coverage_boundary_) {
+    replay_coverage_valid_ = false;
     return;
   }
 
@@ -68,6 +74,8 @@ void ImuRatePredictor::updateSnapshot(const IMUST &posterior,
   predicted_ = posterior;
   acceleration_scale_ = acceleration_scale;
   has_snapshot_ = true;
+  replay_coverage_valid_ = true;
+  has_replay_coverage_boundary_ = false;
 
   while (!tail_.empty() && tail_.front().t <= posterior.t) {
     tail_.pop_front();
@@ -106,12 +114,18 @@ ImuRatePrediction ImuRatePredictor::pushImu(const ImuRateSample &sample) {
   predicted_ = candidate;
   tail_.push_back(sample);
   if (tail_.size() > kMaxRetainedSamples) {
+    replay_coverage_boundary_ = tail_.front().t;
+    has_replay_coverage_boundary_ = true;
     tail_.pop_front();
   }
 
   ImuRatePrediction prediction;
   prediction.state = predicted_;
   prediction.unbiased_angular_velocity = sample.gyro - predicted_.bg;
+  if (!replay_coverage_valid_) {
+    prediction.reason = ImuRateRejectReason::NO_SNAPSHOT;
+    return prediction;
+  }
   if (sample.t - snapshot_.t > max_prediction_sec_) {
     prediction.reason = ImuRateRejectReason::PREDICTION_HORIZON_EXCEEDED;
     return prediction;
@@ -141,7 +155,10 @@ ImuRatePrediction ImuRatePredictor::makePredictionLocked(
 
 void ImuRatePredictor::clearStateLocked() {
   has_snapshot_ = false;
+  replay_coverage_valid_ = true;
+  has_replay_coverage_boundary_ = false;
   acceleration_scale_ = 1.0;
+  replay_coverage_boundary_ = 0.0;
   snapshot_ = IMUST();
   snapshot_.g.setZero();
   predicted_ = IMUST();

@@ -55,8 +55,11 @@ class ImuRatePredictor {
   mutable std::mutex mutex_;
   bool enabled_ = true;
   bool has_snapshot_ = false;
+  bool replay_coverage_valid_ = true;
+  bool has_replay_coverage_boundary_ = false;
   double max_prediction_sec_ = 0.5;
   double acceleration_scale_ = 1.0;
+  double replay_coverage_boundary_ = 0.0;
   IMUST snapshot_;
   IMUST predicted_;
   SampleDeque tail_;

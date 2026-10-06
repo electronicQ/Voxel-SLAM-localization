@@ -225,4 +225,102 @@ TEST(ImuRatePredictor, UpdatedMaximumPredictionHorizonTakesEffect) {
             ImuRateRejectReason::PREDICTION_HORIZON_EXCEEDED);
 }
 
+TEST(ImuRatePredictor, IgnoresInvalidMaximumPredictionUpdates) {
+  ImuRatePredictor predictor(0.5);
+  IMUST posterior = makePosterior();
+  posterior.v = Eigen::Vector3d::UnitX();
+  predictor.updateSnapshot(posterior, 2.0);
+  ASSERT_TRUE(predictor.pushImu(gravityBalancedSample(0.1)).publishable);
+
+  predictor.setMaxPredictionSec(
+      std::numeric_limits<double>::quiet_NaN());
+  const ImuRatePrediction after_nan =
+      predictor.pushImu(gravityBalancedSample(0.2));
+  ASSERT_TRUE(after_nan.publishable);
+  EXPECT_NEAR(after_nan.state.p.x(), 0.2, kTolerance);
+
+  predictor.setMaxPredictionSec(0.0);
+  const ImuRatePrediction after_zero =
+      predictor.pushImu(gravityBalancedSample(0.3));
+  ASSERT_TRUE(after_zero.publishable);
+  EXPECT_NEAR(after_zero.state.p.x(), 0.3, kTolerance);
+
+  predictor.setMaxPredictionSec(-1.0);
+  const ImuRatePrediction after_negative =
+      predictor.pushImu(gravityBalancedSample(0.4));
+  ASSERT_TRUE(after_negative.publishable);
+  EXPECT_NEAR(after_negative.state.p.x(), 0.4, kTolerance);
+}
+
+TEST(ImuRatePredictor, IgnoresInvalidSnapshotUpdates) {
+  ImuRatePredictor predictor(0.5);
+  IMUST posterior = makePosterior();
+  predictor.updateSnapshot(posterior, 2.0);
+  ImuRateSample accelerated = gravityBalancedSample(0.1);
+  accelerated.accel.x() = 1.0;
+  ASSERT_TRUE(predictor.pushImu(accelerated).publishable);
+
+  IMUST nonfinite_posterior = makePosterior(0.1);
+  nonfinite_posterior.p.x() =
+      std::numeric_limits<double>::infinity();
+  predictor.updateSnapshot(nonfinite_posterior, 2.0);
+  const ImuRatePrediction after_bad_posterior =
+      predictor.pushImu(gravityBalancedSample(0.2));
+  ASSERT_TRUE(after_bad_posterior.publishable);
+  EXPECT_NEAR(after_bad_posterior.state.p.x(), 0.03, kTolerance);
+  EXPECT_NEAR(after_bad_posterior.state.v.x(), 0.2, kTolerance);
+
+  IMUST replacement = makePosterior(0.2);
+  replacement.p.x() = 100.0;
+  predictor.updateSnapshot(
+      replacement, std::numeric_limits<double>::quiet_NaN());
+  const ImuRatePrediction after_bad_scale =
+      predictor.pushImu(gravityBalancedSample(0.3));
+  ASSERT_TRUE(after_bad_scale.publishable);
+  EXPECT_NEAR(after_bad_scale.state.p.x(), 0.05, kTolerance);
+  EXPECT_NEAR(after_bad_scale.state.v.x(), 0.2, kTolerance);
+
+  predictor.updateSnapshot(makePosterior(), 2.0);
+  const ImuRatePrediction after_replay =
+      predictor.pushImu(gravityBalancedSample(0.4));
+  ASSERT_TRUE(after_replay.publishable);
+  EXPECT_NEAR(after_replay.state.p.x(), 0.07, kTolerance);
+  EXPECT_NEAR(after_replay.state.v.x(), 0.2, kTolerance);
+}
+
+TEST(ImuRatePredictor, BlocksReplayAcrossEvictedTailUntilCoverageRecovers) {
+  constexpr int kRetainedSampleLimit = 4096;
+  constexpr double kDt = 0.001;
+  ImuRatePredictor predictor(10.0);
+  IMUST initial = makePosterior();
+  initial.v = Eigen::Vector3d::UnitX();
+  predictor.updateSnapshot(initial, 2.0);
+
+  for (int i = 1; i <= kRetainedSampleLimit + 1; ++i) {
+    const ImuRatePrediction prediction =
+        predictor.pushImu(gravityBalancedSample(i * kDt));
+    ASSERT_TRUE(prediction.publishable) << "sample " << i;
+  }
+
+  IMUST too_old = makePosterior(0.5 * kDt);
+  too_old.v = Eigen::Vector3d::UnitX();
+  predictor.updateSnapshot(too_old, 2.0);
+  const ImuRatePrediction blocked = predictor.pushImu(
+      gravityBalancedSample((kRetainedSampleLimit + 2) * kDt));
+  EXPECT_FALSE(blocked.publishable);
+  EXPECT_EQ(blocked.reason, ImuRateRejectReason::NO_SNAPSHOT);
+
+  IMUST covered = makePosterior(2.0 * kDt);
+  covered.p.x() = 2.0 * kDt;
+  covered.v = Eigen::Vector3d::UnitX();
+  predictor.updateSnapshot(covered, 2.0);
+  const ImuRatePrediction recovered = predictor.pushImu(
+      gravityBalancedSample((kRetainedSampleLimit + 3) * kDt));
+
+  ASSERT_TRUE(recovered.publishable);
+  EXPECT_EQ(recovered.reason, ImuRateRejectReason::NONE);
+  EXPECT_NEAR(recovered.state.p.x(),
+              (kRetainedSampleLimit + 3) * kDt, kTolerance);
+}
+
 }  // namespace
