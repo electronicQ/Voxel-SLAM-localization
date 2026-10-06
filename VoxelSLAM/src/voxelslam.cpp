@@ -6,6 +6,8 @@
 #include "prior_map_tracker.hpp"
 #include "relocalizer.hpp"
 #include "session_aligner.hpp"
+#include "spatial_map_manager.hpp"
+#include "spatial_map_matcher.hpp"
 
 #include <geometry_msgs/PoseWithCovarianceStamped.h>
 #include <std_msgs/Bool.h>
@@ -43,6 +45,25 @@ void updateFromCorrectionState(const CorrectionState &source, IMUST &target) {
   target.ba = source.ba;
   target.g = source.g;
   target.cov = source.cov;
+}
+
+double spatialSnapshotMemoryMb(
+    const std::shared_ptr<const SpatialMapSnapshot> &snapshot) {
+  if (!snapshot) return 0.0;
+  std::size_t bytes = sizeof(SpatialMapSnapshot);
+  bytes += snapshot->blocks.size() *
+           sizeof(std::pair<const BlockIndex,
+                            std::shared_ptr<const StaticMapBlock>>);
+  for (const auto &entry : snapshot->blocks) {
+    if (!entry.second) continue;
+    const StaticMapBlock &block = *entry.second;
+    bytes += sizeof(StaticMapBlock);
+    bytes += block.roots.capacity() * sizeof(RootVoxelRecord);
+    bytes += block.nodes.capacity() * sizeof(StaticOctreeNode);
+    bytes += block.planes.capacity() * sizeof(StaticPlane);
+    bytes += block.display_points.capacity() * sizeof(SpatialMapPoint);
+  }
+  return static_cast<double>(bytes) / (1024.0 * 1024.0);
 }
 
 }  // namespace
@@ -806,6 +827,15 @@ public:
   string bagname, savepath;
   string operation_mode, map_export_path, localization_map_path;
   SavedMap localization_map;
+  SpatialMapConfig localization_spatial_config;
+  SpatialMapConfig map_export_spatial_config;
+  SpatialMapRuntimeConfig spatial_runtime_config;
+  std::shared_ptr<FileSpatialBlockSource> spatial_block_source;
+  std::unique_ptr<SpatialMapManager> spatial_map_manager;
+  std::unique_ptr<StaticMapMatcher> spatial_map_matcher;
+  std::uint64_t spatial_map_generation = 0;
+  double local_map_prepare_started_sec = 0.0;
+  double map_gap_started_sec = -1.0;
   PriorMapTracker prior_map_tracker;
   mutex historical_map_mutex;
   std::atomic<bool> prior_map_ready{false};
@@ -872,6 +902,36 @@ public:
                  local_map_max_load_per_scan, 1);
     n.param<int>("Localization/local_map_preload_limit",
                  local_map_preload_limit, 20);
+    n.param<double>("Localization/spatial_map/preload_radius",
+                    spatial_runtime_config.preload_radius, 15.0);
+    n.param<double>("Localization/spatial_map/load_radius",
+                    spatial_runtime_config.load_radius, 30.0);
+    n.param<double>("Localization/spatial_map/unload_radius",
+                    spatial_runtime_config.unload_radius, 40.0);
+    n.param<double>("Localization/spatial_map/prefetch_time_sec",
+                    spatial_runtime_config.prefetch_time_sec, 2.0);
+    n.param<double>("Localization/spatial_map/map_gap_timeout_sec",
+                    spatial_runtime_config.map_gap_timeout_sec, 1.0);
+    n.param<double>("Localization/spatial_map/preload_timeout_sec",
+                    spatial_runtime_config.preload_timeout_sec, 10.0);
+    n.param<int>("Localization/spatial_map/max_background_loads",
+                 spatial_runtime_config.max_background_loads, 2);
+    n.param<double>("MapBlock/size_x", map_export_spatial_config.size_x,
+                    20.0);
+    n.param<double>("MapBlock/size_y", map_export_spatial_config.size_y,
+                    20.0);
+    n.param<double>("MapBlock/size_z", map_export_spatial_config.size_z,
+                    10.0);
+    n.param<double>("MapBlock/fusion_leaf_size",
+                    map_export_spatial_config.fusion_leaf_size, 0.1);
+    n.param<double>("MapBlock/root_voxel_size",
+                    map_export_spatial_config.root_voxel_size, 1.0);
+    n.param<int>("MapBlock/max_layer",
+                 map_export_spatial_config.max_layer, 2);
+    n.param<double>("MapBlock/min_eigen_value",
+                    map_export_spatial_config.min_eigen_value, 0.0025);
+    n.param<bool>("MapBlock/save_display_cloud",
+                  map_export_spatial_config.save_display_cloud, false);
     n.param<bool>("Localization/rviz_initialpose_enabled",
                   rviz_initialpose_enabled, true);
     n.param<int>("Localization/direct_pose_validation_scans",
@@ -948,6 +1008,20 @@ public:
     {
       ROS_FATAL("Localization map-cache or direct-validation settings are invalid.");
       throw std::invalid_argument("invalid localization settings");
+    }
+    string spatial_config_error;
+    if(operation_mode == "localization" &&
+       !spatial_runtime_config.validate(spatial_config_error))
+    {
+      ROS_FATAL_STREAM("Invalid Localization/spatial_map settings: "
+                       << spatial_config_error);
+      throw std::invalid_argument("invalid spatial map runtime settings");
+    }
+    if(operation_mode == "mapping" && !map_export_path.empty() &&
+       !map_export_spatial_config.validate(spatial_config_error))
+    {
+      ROS_FATAL_STREAM("Invalid MapBlock settings: " << spatial_config_error);
+      throw std::invalid_argument("invalid map block settings");
     }
 
     sub_imu = n.subscribe(imu_topic, 80000, imu_handler);
@@ -1098,6 +1172,12 @@ public:
     return localization_machine.state();
   }
 
+  bool localization_local_map_ready_snapshot()
+  {
+    lock_guard<mutex> lock(localization_state_mutex);
+    return localization_machine.local_map_ready();
+  }
+
   AlignmentSource alignment_source_snapshot()
   {
     lock_guard<mutex> lock(localization_state_mutex);
@@ -1220,6 +1300,33 @@ public:
   {
     lock_guard<mutex> lock(historical_map_mutex);
     prior_map_tracker.reset_runtime_cache();
+    if(spatial_map_manager)
+    {
+      spatial_map_generation = spatial_map_manager->begin_session();
+      map_gap_started_sec = -1.0;
+    }
+  }
+
+  bool start_spatial_map_preparation(const Eigen::Vector3d &center,
+                                     string &error)
+  {
+    error.clear();
+    if(!spatial_map_manager || !spatial_map_matcher)
+    {
+      error = "spatial map manager is not initialized";
+      return false;
+    }
+    spatial_map_generation = spatial_map_manager->begin_session();
+    if(!spatial_map_manager->request(center, x_curr.v,
+                                     spatial_map_generation, &error))
+      return false;
+    local_map_prepare_started_sec = ros::Time::now().toSec();
+    map_gap_started_sec = -1.0;
+
+    // The temporary local-odometry map must not leak into map tracking.
+    release_voxel_map(surf_map);
+    surf_map_slide.clear();
+    return true;
   }
 
   bool apply_frontend_global_correction(const IMUST &correction,
@@ -1312,15 +1419,6 @@ public:
     if(!initial_pose_requests.is_current(request.generation))
       return 0;
 
-    if(!rebuild_historical_local_map(seed.T_W_C.t, error))
-    {
-      handled_direct_generation = request.generation;
-      handle_localization_event(LocalizationEvent::DIRECT_POSE_FAILED);
-      return -1;
-    }
-    if(!initial_pose_requests.is_current(request.generation))
-      return 0;
-
     IMUST correction;
     correction.R = seed.T_W_O.R;
     correction.p = seed.T_W_O.t;
@@ -1339,6 +1437,17 @@ public:
       handle_localization_event(LocalizationEvent::DIRECT_POSE_FAILED);
       return -1;
     }
+    if(!start_spatial_map_preparation(seed.T_W_C.t, error) ||
+       !handle_localization_event(
+            LocalizationEvent::ALIGNMENT_APPLIED).accepted)
+    {
+      handled_direct_generation = request.generation;
+      reset_historical_runtime_cache();
+      handle_localization_event(LocalizationEvent::DIRECT_POSE_FAILED);
+      if(error.empty())
+        error = "localization state rejected spatial-map preparation";
+      return -1;
+    }
 
     direct_validation_active = true;
     active_direct_generation = request.generation;
@@ -1353,7 +1462,9 @@ public:
 
   // The point-to-plane alignment for odometry
   bool lio_state_estimation(PVecPtr pptr, TrackingQuality *quality = nullptr,
-                            double minimum_normal_eigenvalue = 14.0)
+                            double minimum_normal_eigenvalue = 14.0,
+                            std::shared_ptr<const SpatialMapSnapshot>
+                                spatial_snapshot = nullptr)
   {
     TrackingQuality candidate_quality;
     IMUST x_prop = x_curr;
@@ -1370,6 +1481,9 @@ public:
     int psize = pptr->size();
     vector<OctoTree*> octos;
     octos.resize(psize, nullptr);
+    vector<StaticMapNodeHint> static_hints(psize);
+    const bool use_spatial_map =
+        spatial_snapshot != nullptr && spatial_map_matcher != nullptr;
 
     Eigen::Matrix3d nnt; 
     Eigen::Matrix<double, DIM, DIM> cov_inv = x_curr.cov.inverse();
@@ -1393,30 +1507,69 @@ public:
         double sigma_d = 0;
         Plane* pla = nullptr;
         int flag = 0;
-        if(octos[i] != nullptr && octos[i]->inside(wld))
+        Eigen::Vector3d plane_center = Eigen::Vector3d::Zero();
+        Eigen::Vector3d plane_normal = Eigen::Vector3d::Zero();
+        if(use_spatial_map)
         {
-          double max_prob = 0;
-          flag = octos[i]->match(wld, pla, max_prob, var_world, sigma_d, octos[i]);
+          try
+          {
+            const BlockIndex block_index =
+                world_to_block(wld, localization_spatial_config);
+            const auto block = spatial_snapshot->blocks.find(block_index);
+            if(block != spatial_snapshot->blocks.end() && block->second)
+            {
+              StaticPlaneMatch static_match;
+              const StaticMapNodeHint *hint =
+                  static_hints[i].node_index == kInvalidSpatialIndex
+                      ? nullptr : &static_hints[i];
+              if(spatial_map_matcher->match(*block->second, wld, var_world,
+                                            hint, static_match))
+              {
+                flag = 1;
+                plane_center = static_match.center;
+                plane_normal = static_match.normal;
+                sigma_d = static_match.sigma_d;
+                static_hints[i].block_index = static_match.block_index;
+                static_hints[i].node_index = static_match.node_index;
+              }
+            }
+          }
+          catch(const std::exception&)
+          {
+            flag = 0;
+          }
         }
         else
         {
-          flag = match(surf_map, wld, pla, var_world, sigma_d, octos[i]);
+          if(octos[i] != nullptr && octos[i]->inside(wld))
+          {
+            double max_prob = 0;
+            flag = octos[i]->match(wld, pla, max_prob, var_world, sigma_d,
+                                   octos[i]);
+          }
+          else
+          {
+            flag = match(surf_map, wld, pla, var_world, sigma_d, octos[i]);
+          }
+          if(flag && pla != nullptr)
+          {
+            plane_center = pla->center;
+            plane_normal = pla->normal;
+          }
         }
 
         if(flag)
-        // if(pla != nullptr)
         {
-          Plane &pp = *pla;
           double R_inv = 1.0 / (0.0005 + sigma_d);
-          double resi = pp.normal.dot(wld - pp.center);
+          double resi = plane_normal.dot(wld - plane_center);
           absolute_residual_sum += std::abs(resi);
 
           Eigen::Matrix<double, 6, 1> jac;
-          jac.head(3) = phat * x_curr.R.transpose() * pp.normal;
-          jac.tail(3) = pp.normal;
+          jac.head(3) = phat * x_curr.R.transpose() * plane_normal;
+          jac.tail(3) = plane_normal;
           HTH += R_inv * jac * jac.transpose();
           HTz -= R_inv * jac * resi;
-          nnt += pp.normal * pp.normal.transpose();
+          nnt += plane_normal * plane_normal.transpose();
           match_num++;
         }
 
@@ -2159,17 +2312,115 @@ public:
         var_init(extrin_para, pl_down, pptr, dept_err, beam_err);
 
         TrackingQuality scan_quality;
-        if(operation_mode == "localization" &&
-           (localization_valid.load() || direct_validation_active) &&
-           prior_map_ready.load())
+        LocalizationState current_localization_state =
+            localization_state_snapshot();
+        if(operation_mode == "localization" && prior_map_ready.load() &&
+           (current_localization_state ==
+                LocalizationState::PREPARING_LOCAL_MAP ||
+            current_localization_state ==
+                LocalizationState::IN_MAP_TRACKING))
         {
-          string cache_error;
-          bool tracking_good = false;
-          if(update_historical_local_map(cache_error))
+          const IMUST propagated_state = x_curr;
+          string map_request_error;
+          if(!spatial_map_manager ||
+             !spatial_map_manager->request(x_curr.p, x_curr.v,
+                                           spatial_map_generation,
+                                           &map_request_error))
           {
+            ROS_WARN_STREAM_THROTTLE(
+                1.0, "Spatial map request failed: " << map_request_error);
+          }
+          SpatialMapStatus map_status = spatial_map_manager
+                                            ? spatial_map_manager->status()
+                                            : SpatialMapStatus();
+          if(map_status.failed_core_block_count > 0U)
+          {
+            ROS_WARN_STREAM("Required spatial map block failed to load: "
+                            << map_status.last_error);
+            if(current_localization_state ==
+               LocalizationState::IN_MAP_TRACKING)
+            {
+              handle_localization_event(
+                  LocalizationEvent::MAP_GAP_TIMEOUT);
+              lost_recovery_pending = true;
+            }
+            else if(alignment_source_snapshot() ==
+                    AlignmentSource::RVIZ_INITIAL_POSE)
+            {
+              handle_localization_event(
+                  LocalizationEvent::DIRECT_POSE_FAILED);
+            }
+            else
+            {
+              handle_localization_event(
+                  LocalizationEvent::LOCAL_MAP_FAILED);
+            }
+            direct_validation_active = false;
+            active_direct_generation = 0;
+            reset_historical_runtime_cache();
+            system_reset(imus);
+            motion_init_flag = 1;
+            reset_flag = 1;
+            continue;
+          }
+          if(current_localization_state ==
+                 LocalizationState::PREPARING_LOCAL_MAP &&
+             map_status.core_ready &&
+             !localization_local_map_ready_snapshot())
+          {
+            if(handle_localization_event(
+                   LocalizationEvent::LOCAL_MAP_READY).accepted &&
+               alignment_source_snapshot() ==
+                   AlignmentSource::RVIZ_INITIAL_POSE)
+              direct_validation_started_sec = ros::Time::now().toSec();
+            current_localization_state = localization_state_snapshot();
+          }
+
+          const bool waiting_for_first_map =
+              current_localization_state ==
+                  LocalizationState::PREPARING_LOCAL_MAP &&
+              !localization_local_map_ready_snapshot() &&
+              !map_status.core_ready;
+          if(waiting_for_first_map)
+          {
+            const double waiting_sec = ros::Time::now().toSec() -
+                                       local_map_prepare_started_sec;
+            if(waiting_sec > spatial_runtime_config.preload_timeout_sec ||
+               (map_status.idle && !map_status.last_error.empty()))
+            {
+              ROS_WARN_STREAM("Spatial local-map preparation failed: "
+                              << map_status.last_error);
+              handle_localization_event(LocalizationEvent::LOCAL_MAP_FAILED);
+              direct_validation_active = false;
+              active_direct_generation = 0;
+              reset_historical_runtime_cache();
+              system_reset(imus);
+              motion_init_flag = 1;
+              reset_flag = 1;
+              continue;
+            }
+
+            // IMU-only propagation while the first immutable core is loading.
+            pwld.clear();
+            pvec_update(pptr, x_curr, pwld);
+            ResultOutput::instance().pub_localtraj(
+                pwld, jour, x_curr, sessionNames.size()-1, pcl_path);
+            continue;
+          }
+
+          const std::shared_ptr<const SpatialMapSnapshot> spatial_snapshot =
+              spatial_map_manager ? spatial_map_manager->snapshot() : nullptr;
+          bool tracking_good = false;
+          double spatial_match_ms = 0.0;
+          if(spatial_snapshot && !spatial_snapshot->blocks.empty())
+          {
+            const double match_started_sec = ros::Time::now().toSec();
             const bool solver_good =
                 lio_state_estimation(pptr, &scan_quality,
-                                     tracking_min_normal_eigenvalue);
+                                     tracking_min_normal_eigenvalue,
+                                     spatial_snapshot);
+            spatial_match_ms =
+                (ros::Time::now().toSec() - match_started_sec) * 1000.0;
             tracking_good =
                 solver_good &&
                 scan_quality.matched_points >= tracking_min_matched_points &&
@@ -2178,22 +2429,53 @@ public:
                 scan_quality.min_normal_eigenvalue >=
                     tracking_min_normal_eigenvalue;
           }
+          last_tracking_quality = scan_quality;
+
+          const bool loading_required_core =
+              !tracking_good && !map_status.core_ready &&
+              map_status.pending_block_count > 0U;
+          if(loading_required_core)
+          {
+            x_curr = propagated_state;
+            if(map_gap_started_sec < 0.0)
+              map_gap_started_sec = ros::Time::now().toSec();
+            if(ros::Time::now().toSec() - map_gap_started_sec >
+               spatial_runtime_config.map_gap_timeout_sec)
+            {
+              const LocalizationTransition gap_transition =
+                  handle_localization_event(
+                      LocalizationEvent::MAP_GAP_TIMEOUT);
+              if(gap_transition.cleanup_requested)
+              {
+                direct_validation_active = false;
+                active_direct_generation = 0;
+                reset_historical_runtime_cache();
+                system_reset(imus);
+                motion_init_flag = 1;
+                reset_flag = 1;
+                lost_recovery_pending = true;
+                continue;
+              }
+            }
+          }
           else
           {
-            ROS_WARN_STREAM_THROTTLE(
-                1.0, "Historical local-map update failed: " << cache_error);
+            map_gap_started_sec = -1.0;
           }
-          last_tracking_quality = scan_quality;
+
           if(tracking_good)
           {
             if(degrade_cnt > 0) degrade_cnt--;
           }
-          else
+          else if(!loading_required_core)
           {
             degrade_cnt++;
           }
 
-          if(direct_validation_active)
+          // Do not score or time out an RViz pose while a newly required
+          // core is still being fetched.  This scan was deliberately rolled
+          // back to IMU propagation and therefore carries no map evidence.
+          if(direct_validation_active && !loading_required_core)
           {
             if(tracking_good)
               direct_validation_streak++;
@@ -2226,7 +2508,8 @@ public:
             }
           }
 
-          if(!direct_validation_active && localization_valid.load())
+          if(!direct_validation_active && localization_valid.load() &&
+             !loading_required_core)
           {
             LocalizationEvent tracking_event =
                 !scan_quality.finite
@@ -2253,6 +2536,23 @@ public:
           pvec_update(pptr, x_curr, pwld);
           ResultOutput::instance().pub_localtraj(
               pwld, jour, x_curr, sessionNames.size()-1, pcl_path);
+
+          const SpatialMapStatus diagnostic_status =
+              spatial_map_manager->status();
+          ROS_INFO_STREAM("SPATIAL_MAP active="
+                          << (spatial_snapshot
+                                  ? spatial_snapshot->blocks.size() : 0U)
+                          << " pending="
+                          << diagnostic_status.pending_block_count
+                          << " core="
+                          << (diagnostic_status.core_ready ? 1 : 0)
+                          << " load_ms="
+                          << diagnostic_status.last_load_ms
+                          << " match_ms=" << spatial_match_ms
+                          << " frame_ms="
+                          << ((ros::Time::now().toSec() - t0) * 1000.0)
+                          << " memory_mb="
+                          << spatialSnapshotMemoryMb(spatial_snapshot));
 
           // Historical localization is read-only: the current scan is never
           // inserted into surf_map or any sliding-window map.
@@ -2679,14 +2979,6 @@ public:
            alignment_source_snapshot() != AlignmentSource::BTC)
           continue;
 
-        if(!rebuild_historical_local_map(
-               alignment.optimized_current.back().t, error))
-        {
-          ROS_WARN_STREAM("BTC historical-map build failed: " << error);
-          handle_localization_event(LocalizationEvent::BTC_FAILED);
-          frontend_reset_requested.store(true);
-          continue;
-        }
         IMUST correction;
         correction.R = alignment.T_W_O.R;
         correction.p = alignment.T_W_O.t;
@@ -2698,19 +2990,30 @@ public:
         if(!btc_alignment_still_active)
           continue;
         if(correction_succeeded &&
+           !start_spatial_map_preparation(
+                alignment.optimized_current.back().t, error))
+        {
+          correction_succeeded = false;
+        }
+        if(correction_succeeded &&
            !handle_localization_event(
                 LocalizationEvent::ALIGNMENT_APPLIED).accepted)
         {
           correction_succeeded = false;
           error = "localization state rejected the BTC alignment";
         }
+        if(!correction_succeeded)
+        {
+          if(localization_state_snapshot() == LocalizationState::ALIGNING &&
+             alignment_source_snapshot() == AlignmentSource::BTC)
+            handle_localization_event(LocalizationEvent::BTC_FAILED);
+          reset_historical_runtime_cache();
+          frontend_reset_requested.store(true);
+        }
       }
       if(!correction_succeeded)
       {
         ROS_WARN_STREAM("BTC frontend correction failed: " << error);
-        handle_localization_event(LocalizationEvent::BTC_FAILED);
-        reset_historical_runtime_cache();
-        frontend_reset_requested.store(true);
         continue;
       }
       ROS_INFO_STREAM("BTC localization validated with history frame "
@@ -2825,11 +3128,27 @@ public:
       load_options.keyframe_voxel_size = voxel_size / 10.0;
       load_options.btc_config = config_setting;
       string map_error;
-      if(!MapPackageIO::load(localization_map_path, localization_map,
-                             load_options, map_error) ||
-         !prior_map_tracker.initialize(localization_map, map_error))
+      LoadedMapPackage loaded_package;
+      if(!MapPackageIO::load(localization_map_path, loaded_package,
+                             load_options, map_error))
       {
         ROS_FATAL_STREAM("Failed to load localization map package: "
+                         << map_error);
+        ros::shutdown();
+        return;
+      }
+      localization_map = std::move(loaded_package.historical_map);
+      localization_spatial_config = loaded_package.spatial_catalog.config;
+      spatial_block_source.reset(new FileSpatialBlockSource(
+          loaded_package.directory, std::move(loaded_package.spatial_catalog)));
+      spatial_map_manager.reset(new SpatialMapManager(
+          spatial_block_source, spatial_runtime_config));
+      spatial_map_matcher.reset(new StaticMapMatcher(
+          localization_spatial_config));
+      spatial_map_generation = spatial_map_manager->begin_session();
+      if(!prior_map_tracker.initialize(localization_map, map_error))
+      {
+        ROS_FATAL_STREAM("Failed to initialize localization map index: "
                          << map_error);
         ros::shutdown();
         return;
@@ -3315,6 +3634,7 @@ public:
         export_options.keyframe_angle_deg = 5.0;
         export_options.keyframe_voxel_size = voxel_size / 10.0;
         export_options.btc_config = config_setting;
+        export_options.spatial_map = map_export_spatial_config;
         if(MapPackageIO::save(map_export_path, captured_map, export_options,
                               export_error))
         {

@@ -55,3 +55,15 @@ GBA:
   min_eigen_value: 0.01
   eigen_value_array: [4.0, 4.0, 4.0, 4.0]
   total_max_iter: 6
+
+# 建图结束时生成的 v2 定位地图采用固定空间块。以下参数会写入地图
+# 清单，定位时从地图清单读取，不能再由定位配置覆盖。
+MapBlock:
+  size_x: 20.0
+  size_y: 20.0
+  size_z: 10.0
+  fusion_leaf_size: 0.1
+  root_voxel_size: 1.0
+  max_layer: 2
+  min_eigen_value: 0.0025
+  save_display_cloud: false

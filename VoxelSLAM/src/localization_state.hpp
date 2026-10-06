@@ -93,6 +93,7 @@ class LocalizationStateMachine {
   LocalizationState state() const;
   AlignmentSource alignment_source() const;
   bool map_loaded() const;
+  bool local_map_ready() const;
   bool localization_valid() const;
   int bad_tracking_streak() const;
   std::uint64_t cleanup_count() const;

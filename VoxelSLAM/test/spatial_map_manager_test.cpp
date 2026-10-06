@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <map>
 #include <mutex>
 #include <set>
 #include <thread>
@@ -21,6 +22,7 @@ class ControllableBlockSource : public SpatialBlockSource {
             std::string &error) override {
     std::unique_lock<std::mutex> lock(mutex_);
     requested_.insert(index);
+    ++load_counts_[index];
     requested_cv_.notify_all();
     release_cv_.wait(lock, [&] { return released_ || stopped_; });
     if (stopped_) {
@@ -59,12 +61,18 @@ class ControllableBlockSource : public SpatialBlockSource {
     release_cv_.notify_all();
   }
 
+  int load_count(const BlockIndex &index) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return load_counts_[index];
+  }
+
  private:
   SpatialMapCatalog catalog_;
   std::mutex mutex_;
   std::condition_variable requested_cv_;
   std::condition_variable release_cv_;
   std::set<BlockIndex> requested_;
+  std::map<BlockIndex, int> load_counts_;
   std::set<BlockIndex> failed_;
   bool released_ = false;
   bool stopped_ = false;
@@ -141,6 +149,11 @@ TEST(SpatialMapManager, ReportsLoadFailureWithoutPublishingCorruptBlock) {
   EXPECT_FALSE(status.last_error.empty());
   EXPECT_FALSE(status.core_ready);
   EXPECT_EQ(manager.snapshot()->blocks.count(BlockIndex(0, 0, 0)), 0U);
+  EXPECT_GT(status.failed_core_block_count, 0U);
+  ASSERT_TRUE(manager.request(Eigen::Vector3d::Zero(),
+                              Eigen::Vector3d::Zero(), generation));
+  ASSERT_TRUE(manager.wait_until_idle(kTimeout));
+  EXPECT_EQ(source->load_count(BlockIndex(0, 0, 0)), 1);
 }
 
 TEST(SpatialMapManager, ConcurrentSnapshotsRemainImmutable) {
@@ -162,6 +175,37 @@ TEST(SpatialMapManager, ConcurrentSnapshotsRemainImmutable) {
   ASSERT_TRUE(manager.wait_until_idle(kTimeout));
   EXPECT_FALSE(manager.snapshot()->blocks.empty());
   EXPECT_TRUE(before->blocks.empty());
+}
+
+TEST(SpatialMapManager, RepeatedRequestsDoNotDuplicateActiveLoads) {
+  auto source = std::make_shared<ControllableBlockSource>(catalogFixture());
+  SpatialMapManager manager(source, runtimeConfig());
+  const std::uint64_t generation = manager.begin_session();
+  ASSERT_TRUE(manager.request(Eigen::Vector3d::Zero(),
+                              Eigen::Vector3d::Zero(), generation));
+  for (int i = 0; i < 20; ++i) {
+    ASSERT_TRUE(manager.request(Eigen::Vector3d::Zero(),
+                                Eigen::Vector3d::Zero(), generation));
+  }
+  source->release_all();
+  ASSERT_TRUE(manager.wait_until_idle(kTimeout));
+  for (const auto &entry : manager.snapshot()->blocks) {
+    EXPECT_EQ(source->load_count(entry.first), 1);
+  }
+}
+
+TEST(SpatialMapManager, KeepsDesiredPrefetchBlocksOutsideCurrentUnloadRadius) {
+  auto source = std::make_shared<ControllableBlockSource>(catalogFixture());
+  source->release_all();
+  SpatialMapManager manager(source, runtimeConfig());
+  const std::uint64_t generation = manager.begin_session();
+  const Eigen::Vector3d velocity(50.0, 0.0, 0.0);
+  ASSERT_TRUE(manager.request(Eigen::Vector3d::Zero(), velocity, generation));
+  ASSERT_TRUE(manager.wait_until_idle(kTimeout));
+  ASSERT_GT(manager.snapshot()->blocks.count(BlockIndex(5, 0, 0)), 0U);
+  ASSERT_TRUE(manager.request(Eigen::Vector3d::Zero(), velocity, generation));
+  ASSERT_TRUE(manager.wait_until_idle(kTimeout));
+  EXPECT_EQ(source->load_count(BlockIndex(5, 0, 0)), 1);
 }
 
 TEST(SpatialMapRuntimeConfig, RejectsInvalidRadiusOrdering) {

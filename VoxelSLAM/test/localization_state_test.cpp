@@ -23,6 +23,7 @@ TEST(LocalizationStateMachine, RunsBtcAndDirectPoseSuccessPaths) {
   EXPECT_TRUE(
       machine.handle(LocalizationEvent::LOCAL_MAP_READY, warning).accepted);
   EXPECT_EQ(machine.state(), LocalizationState::IN_MAP_TRACKING);
+  EXPECT_TRUE(machine.local_map_ready());
   EXPECT_TRUE(machine.localization_valid());
 
   EXPECT_TRUE(
@@ -36,6 +37,7 @@ TEST(LocalizationStateMachine, RunsBtcAndDirectPoseSuccessPaths) {
   EXPECT_TRUE(
       machine.handle(LocalizationEvent::LOCAL_MAP_READY, warning).accepted);
   EXPECT_EQ(machine.state(), LocalizationState::PREPARING_LOCAL_MAP);
+  EXPECT_TRUE(machine.local_map_ready());
   EXPECT_TRUE(
       machine.handle(LocalizationEvent::DIRECT_POSE_VALIDATED, warning).accepted);
   EXPECT_EQ(machine.state(), LocalizationState::IN_MAP_TRACKING);

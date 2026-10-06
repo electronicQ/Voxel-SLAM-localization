@@ -20,11 +20,16 @@ Localization:
   # A package previously exported by General/map_export_path in mapping mode.
   map_path: ""
 
-  # Historical keyframe cache. unload must be >= load to provide hysteresis.
-  local_map_load_radius: 30.0
-  local_map_unload_radius: 40.0
-  local_map_max_load_per_scan: 1
-  local_map_preload_limit: 20
+  # 连续定位使用 v2 地图中的不可变空间块。块尺寸、融合分辨率和八叉树
+  # 参数来自地图清单；这里仅配置运行时加载范围、前视和超时。
+  spatial_map:
+    preload_radius: 15.0
+    load_radius: 30.0
+    unload_radius: 40.0
+    prefetch_time_sec: 2.0
+    map_gap_timeout_sec: 1.0
+    preload_timeout_sec: 10.0
+    max_background_loads: 2
 
   # true: BTC candidates are restricted by the prior x/y and expanding radii.
   # false: BTC searches globally; btc_prior_pose and all radius/fallback fields

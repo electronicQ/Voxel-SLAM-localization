@@ -114,6 +114,7 @@ std::uint64_t SpatialMapManager::begin_session() {
   queued_.clear();
   core_required_.clear();
   desired_.clear();
+  failed_.clear();
   staging_.clear();
   status_ = SpatialMapStatus();
   status_.generation = generation_;
@@ -189,14 +190,14 @@ bool SpatialMapManager::request(const Eigen::Vector3d &position,
       }
       core_required_ = std::move(core);
       desired_ = std::move(desired);
-      status_.last_error.clear();
       queue_.clear();
       queued_.clear();
 
       bool removed = false;
       for (auto it = staging_.begin(); it != staging_.end();) {
         const BlockAabb bounds = block_aabb(it->first, catalog.config);
-        if (!sphere_intersects_aabb(position, config_.unload_radius,
+        if (desired_.count(it->first) == 0U &&
+            !sphere_intersects_aabb(position, config_.unload_radius,
                                     bounds)) {
           it = staging_.erase(it);
           removed = true;
@@ -208,6 +209,14 @@ bool SpatialMapManager::request(const Eigen::Vector3d &position,
       pending.reserve(desired_.size());
       for (const BlockIndex &index : desired_) {
         if (staging_.find(index) != staging_.end()) {
+          continue;
+        }
+        if (failed_.count(index) != 0U) {
+          continue;
+        }
+        const auto active = active_requests_.find(index);
+        if (active != active_requests_.end() &&
+            active->second == generation_) {
           continue;
         }
         const auto catalog_entry = catalog.lookup.find(index);
@@ -245,7 +254,7 @@ bool SpatialMapManager::request(const Eigen::Vector3d &position,
         idle_cv_.notify_all();
       }
     }
-    work_cv_.notify_one();
+    work_cv_.notify_all();
     return true;
   } catch (const std::exception &exception) {
     if (error != nullptr) {
@@ -284,13 +293,19 @@ void SpatialMapManager::worker_loop() {
       request = queue_.front();
       queue_.pop_front();
       queued_.erase(request.index);
+      active_requests_[request.index] = request.generation;
       ++active_loads_;
       update_status_locked();
     }
 
+    const std::chrono::steady_clock::time_point load_started =
+        std::chrono::steady_clock::now();
     StaticMapBlock loaded;
     std::string load_error;
     bool success = source_->load(request.index, loaded, load_error);
+    const double load_ms =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - load_started).count();
     if (success && loaded.index != request.index) {
       success = false;
       load_error = "block source returned a different block index";
@@ -305,12 +320,19 @@ void SpatialMapManager::worker_loop() {
       if (active_loads_ != 0U) {
         --active_loads_;
       }
+      const auto active = active_requests_.find(request.index);
+      if (active != active_requests_.end() &&
+          active->second == request.generation) {
+        active_requests_.erase(active);
+      }
       if (request.generation == generation_ &&
           desired_.count(request.index) != 0U) {
+        status_.last_load_ms = load_ms;
         if (success) {
           staging_[request.index] = std::move(immutable);
           publish_locked();
         } else {
+          failed_.insert(request.index);
           status_.last_error = "failed loading block " +
                                std::to_string(request.index.x) + "," +
                                std::to_string(request.index.y) + "," +
@@ -337,7 +359,20 @@ void SpatialMapManager::update_status_locked() {
   status_.generation = generation_;
   status_.core_block_count = core_required_.size();
   status_.loaded_block_count = staging_.size();
-  status_.pending_block_count = queue_.size() + active_loads_;
+  status_.failed_block_count = failed_.size();
+  status_.failed_core_block_count = 0U;
+  for (const BlockIndex &index : core_required_) {
+    if (failed_.count(index) != 0U) {
+      ++status_.failed_core_block_count;
+    }
+  }
+  std::size_t current_active_loads = 0U;
+  for (const auto &active : active_requests_) {
+    if (active.second == generation_) {
+      ++current_active_loads;
+    }
+  }
+  status_.pending_block_count = queue_.size() + current_active_loads;
   status_.idle = status_.pending_block_count == 0U;
   status_.core_ready = !core_required_.empty();
   for (const BlockIndex &index : core_required_) {

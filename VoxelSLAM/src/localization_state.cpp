@@ -318,6 +318,10 @@ AlignmentSource LocalizationStateMachine::alignment_source() const {
 
 bool LocalizationStateMachine::map_loaded() const { return map_loaded_; }
 
+bool LocalizationStateMachine::local_map_ready() const {
+  return local_map_ready_;
+}
+
 bool LocalizationStateMachine::localization_valid() const {
   return localization_valid_;
 }
