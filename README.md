@@ -297,6 +297,86 @@ python -m unittest VoxelSLAM/test/evaluate_localization_test.py
 git diff --check
 ```
 
+#### 4.5.8 高频里程计与 ROS1 SCAN-Planner 接入
+
+正式状态估计仍使用原有的“收集一帧激光雷达时间范围内的 IMU → 去畸变 → IESKF 点到面更新”链路。新增的高频链路不会替代正式 IESKF，也不会把预测结果写回正式滤波器；它只从最近一次可靠后验复制状态，然后在独立 IMU callback queue 中按 IMU 频率前向传播均值，用于降低导航控制读取位姿时的时间延迟。
+
+定位模式默认只在 `/localization/valid=true` 后输出导航里程计。连续 `IN_MAP_TRACKING` 仍只使用不可变历史空间块地图进行 IESKF 更新，不运行滑窗 BA；重定位成功前的临时 `LOCAL_ODOMETRY` 阶段继续保留原有滑窗 BA。每次扫描 IESKF 后验、BA 写回或全局校正都会刷新高频预测快照。系统重置、定位进入 `LOST`、IMU 时间回退或节点退出会清空高频预测状态。
+
+`Odometry` 下的配置默认值为：
+
+```yaml
+Odometry:
+  imu_rate_output: true
+  imu_odom_topic: "/LIO/odom_imu"
+  odom_frame: "camera_init"
+  imu_child_frame: "aft_mapped"
+  publish_before_localized: false
+  max_prediction_sec: 0.5
+```
+
+主要接口如下：
+
+- `/LIO/odom_imu`：IMU 频率的地图系预测状态。pose 为 `camera_init` 中的 IMU 位姿，线速度按本项目导航约定表达在世界系，角速度表达在 IMU/body 系。
+- TF `camera_init -> aft_mapped`：与 `/LIO/odom_imu` 使用完全相同的传感器时间戳。高频链尚未就绪或被关闭时，保留扫描频率 TF 回退。
+- `/LIO/odom_vehicle`：独立适配节点根据静态 `aft_mapped -> base_link` 外参组合得到的机体里程计，频率与 `/LIO/odom_imu` 相同。
+- `/map_scan`：已经变换到 `camera_init` 的当前配准点云，不是 `laser_link` 下的原始点云，频率为激光雷达帧率。
+- `/localization/state`、`/localization/valid`：定位状态和导航输出有效性门控。
+
+本工程不会发布机器人安装外参。用户的 URDF、`robot_state_publisher` 或静态 TF 发布器必须提供从 `aft_mapped` 到 `base_link` 的固定变换，使 TF 树保持为 `camera_init -> aft_mapped -> base_link`；不要同时发布方向相反、让 `aft_mapped` 获得第二个父节点的静态 TF。
+
+推荐启动顺序：
+
+```bash
+# 1. 启动机器人 URDF/robot_state_publisher，提供 aft_mapped -> base_link
+roslaunch your_robot_description robot_description.launch
+
+# 2. 启动 Voxel-SLAM 定位
+roslaunch voxel_slam vxlm_localization_mid360.launch \
+  map_path:=/absolute/path/to/map_package
+
+# 3. 启动车辆里程计适配器
+roslaunch voxel_slam scan_planner_adapter.launch
+
+# 4. 按下述接口修改 SCAN-Planner 的 launch 后启动
+roslaunch scan_planner run.launch is_real_world:=true sensor_type:=lidar
+```
+
+ROS1 SCAN-Planner 的 `main` 分支已经默认使用 `/LIO/odom_vehicle` 和 `/LIO/odom_imu`，但其实机 launch 仍把点云固定为 `/LIO/clouds_lidar`、`cloud_is_world=false`，并令 `need_extrinsic=is_real_world`。由于本工程输出的 `/map_scan` 已经在世界系，直接使用原 launch 会对点云再次变换。必须在 SCAN-Planner 自己的 `run.launch`/`advanced_param.xml` 中改成以下接口，或复制一份等价的自定义 launch：
+
+```text
+body_pose_topic=/LIO/odom_vehicle
+sensor_pose_topic=/LIO/odom_imu
+cloud_topic=/map_scan
+grid_map/frame_id=camera_init
+grid_map/cloud_is_world=true
+grid_map/need_extrinsic=false
+```
+
+对应的 ROS1 launch 关键项应为：
+
+```xml
+<arg name="cloud_topic" value="/map_scan"/>
+<arg name="cloud_is_world" value="true"/>
+<param name="grid_map/frame_id" value="camera_init" type="str"/>
+<param name="grid_map/need_extrinsic" value="false" type="bool"/>
+```
+
+`max_prediction_sec` 限制最近激光后验之后允许的纯 IMU 外推时长。超过该时长时系统停止发布快速预测，等待新的正式后验，避免把长时间纯惯导漂移继续交给规划器。SCAN-Planner 的控制循环可以高于激光雷达频率：控制器读取最近的 IMU 频率预测位姿，而每次激光观测后验会周期性校正预测起点。
+
+Ubuntu 实机检查：
+
+```bash
+rostopic hz /LIO/odom_imu
+rostopic hz /LIO/odom_vehicle
+rostopic delay /LIO/odom_imu
+rostopic echo -n 1 /localization/valid
+rosrun tf tf_echo camera_init aft_mapped
+rosrun tf tf_echo aft_mapped base_link
+```
+
+如果 `/localization/valid` 为 `false`，默认没有导航里程计输出；如果只有 `/LIO/odom_imu` 而没有 `/LIO/odom_vehicle`，应优先检查静态 TF 方向、frame 名称和适配器节流告警；如果输出在 0.5 秒后停止，应检查激光后验是否仍在更新，而不是盲目增大 `max_prediction_sec`。
+
 ### 4.6 其他类型激光雷达
 
 其他类型激光雷达的支持将在后续发布。
