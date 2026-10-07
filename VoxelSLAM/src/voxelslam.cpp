@@ -1192,8 +1192,9 @@ public:
     }
 
     lock_guard<mutex> output_lock(imu_output_mutex);
-    imu_rate_predictor.updateSnapshot(x_curr, imupre_scale_gravity);
-    imu_prediction_ready.store(true);
+    const bool snapshot_ready =
+        imu_rate_predictor.updateSnapshot(x_curr, imupre_scale_gravity);
+    imu_prediction_ready.store(snapshot_ready);
   }
 
   void publish_imu_rate_odometry(const ImuRatePrediction &prediction)

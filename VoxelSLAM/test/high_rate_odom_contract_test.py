@@ -115,6 +115,18 @@ class HighRateOdometryContractTest(unittest.TestCase):
         self.assertIn("publish_scan_tf", self.cpp)
         self.assertIn("imu_prediction_ready.load()", self.cpp)
 
+    def test_scan_tf_fallback_remains_enabled_when_snapshot_replay_is_rejected(self):
+        body = function_body(
+            self.cpp, "void refresh_imu_rate_predictor_snapshot("
+        )
+        self.assertIn(
+            "const bool snapshot_ready =\n"
+            "        imu_rate_predictor.updateSnapshot",
+            body,
+        )
+        self.assertIn("imu_prediction_ready.store(snapshot_ready)", body)
+        self.assertNotIn("imu_prediction_ready.store(true)", body)
+
     def test_sync_packages_protects_timestamp_and_empty_buffer(self):
         body = function_body(self.hpp, "bool sync_packages(")
         lock_position = body.find("lock_guard<mutex> lock(mBuf)")

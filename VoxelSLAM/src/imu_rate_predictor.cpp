@@ -58,16 +58,16 @@ void ImuRatePredictor::setMaxPredictionSec(double seconds) {
   max_prediction_sec_ = seconds;
 }
 
-void ImuRatePredictor::updateSnapshot(const IMUST &posterior,
+bool ImuRatePredictor::updateSnapshot(const IMUST &posterior,
                                       double acceleration_scale) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!isFinite(posterior) || !std::isfinite(acceleration_scale)) {
-    return;
+    return false;
   }
   if (has_replay_coverage_boundary_ &&
       posterior.t < replay_coverage_boundary_) {
     replay_coverage_valid_ = false;
-    return;
+    return false;
   }
 
   snapshot_ = posterior;
@@ -89,10 +89,11 @@ void ImuRatePredictor::updateSnapshot(const IMUST &posterior,
     IMUST candidate = predicted_;
     if (!propagate(sample, acceleration_scale_, candidate)) {
       clearStateLocked();
-      return;
+      return false;
     }
     predicted_ = candidate;
   }
+  return true;
 }
 
 ImuRatePrediction ImuRatePredictor::pushImu(const ImuRateSample &sample) {

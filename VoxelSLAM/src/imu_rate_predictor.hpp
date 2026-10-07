@@ -39,7 +39,7 @@ class ImuRatePredictor {
   explicit ImuRatePredictor(double max_prediction_sec = 0.5);
   void setEnabled(bool enabled);
   void setMaxPredictionSec(double seconds);
-  void updateSnapshot(const IMUST &posterior, double acceleration_scale);
+  bool updateSnapshot(const IMUST &posterior, double acceleration_scale);
   ImuRatePrediction pushImu(const ImuRateSample &sample);
   void reset();
 

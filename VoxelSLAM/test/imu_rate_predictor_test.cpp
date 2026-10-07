@@ -327,7 +327,7 @@ TEST(ImuRatePredictor, BlocksReplayAcrossEvictedTailUntilCoverageRecovers) {
 
   IMUST too_old = makePosterior(0.5 * kDt);
   too_old.v = Eigen::Vector3d::UnitX();
-  predictor.updateSnapshot(too_old, 2.0);
+  EXPECT_FALSE(predictor.updateSnapshot(too_old, 2.0));
   const ImuRatePrediction blocked = predictor.pushImu(
       gravityBalancedSample((kRetainedSampleLimit + 2) * kDt));
   EXPECT_FALSE(blocked.publishable);
@@ -336,7 +336,7 @@ TEST(ImuRatePredictor, BlocksReplayAcrossEvictedTailUntilCoverageRecovers) {
   IMUST covered = makePosterior(2.0 * kDt);
   covered.p.x() = 2.0 * kDt;
   covered.v = Eigen::Vector3d::UnitX();
-  predictor.updateSnapshot(covered, 2.0);
+  EXPECT_TRUE(predictor.updateSnapshot(covered, 2.0));
   const ImuRatePrediction recovered = predictor.pushImu(
       gravityBalancedSample((kRetainedSampleLimit + 3) * kDt));
 
