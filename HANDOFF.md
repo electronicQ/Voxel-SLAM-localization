@@ -1,6 +1,6 @@
 # Voxel-SLAM地图持久化、全局重定位与只读地图定位实施交接
 
-> **2026-10-07 高频导航接口更新：** 当前分支已经加入独立 IMU callback queue、高频 `/LIO/odom_imu`、同时间戳 `camera_init -> aft_mapped` TF，以及读取静态 `aft_mapped -> base_link` 外参并发布 `/LIO/odom_vehicle` 的 ROS1 适配节点。正式扫描批处理 IESKF、去畸变和协方差传播未被快速链替代；`LOCAL_ODOMETRY` 保留 BA，连续 `IN_MAP_TRACKING` 不使用 BA。实现提交为 `6ed5635`、`e390d27`、`e94177b`、`d69efbc`、`275795e`。Windows 已通过 Python 契约/定位回归/YAML 检查，但 ROS/C++ 编译、gtest、rosbag 频率与时延仍必须在 Ubuntu 20.04 + ROS Noetic 复验。完整使用说明见根目录 README 的“高频里程计与 ROS1 SCAN-Planner 接入”。
+> **2026-10-07 高频导航接口更新：** 当前分支已经加入独立 IMU callback queue、高频 `/LIO/odom_imu`、同时间戳 `camera_init -> aft_mapped` TF，以及读取静态 `aft_mapped -> base_link` 外参并发布 `/LIO/odom_vehicle` 的 ROS1 适配节点。正式扫描批处理 IESKF、去畸变和协方差传播未被快速链替代；`LOCAL_ODOMETRY` 保留 BA，连续 `IN_MAP_TRACKING` 不使用 BA。实现提交为 `6ed5635`、`e390d27`、`e94177b`、`d69efbc`、`275795e`，最终审查修复为 `4411e78`。Windows 已通过 20/20 项 Python 契约与定位回归、8/8 份 YAML、launch XML 和 CMake 文件引用检查，但 ROS/C++ 编译、gtest、rosbag 频率与时延仍必须在 Ubuntu 20.04 + ROS Noetic 复验。完整使用说明见根目录 README 的“高频里程计与 ROS1 SCAN-Planner 接入”。
 
 > **2026-10-06 当前状态：** 本文主体记录的是定位 v1 的设计过程，其中“按历史关键帧加载并重建局部体素地图”的接口和参数已经被后续实现取代。当前开发分支为 `codex/spatial-voxel-blocks`；最新有效设计见 `docs/superpowers/specs/2026-10-06-spatial-voxel-block-map-design.md`，实施计划见 `docs/superpowers/plans/2026-10-06-spatial-voxel-block-map.md`。当前定位连续跟踪使用离线构建的 v2 空间体素块、哈希索引、后台异步加载和不可变快照，不再使用 `rebuild_local_map()`、`update_loaded_keyframes()` 或按关键帧重建 `surf_map`。`PriorMapTracker` 仅保留 BTC 的二维候选范围查询和 RViz 初始位姿的最近高度查询。本文后文涉及旧局部关键帧缓存的内容仅作为 v1 基线与演进记录，不能作为现行接口说明。
 
