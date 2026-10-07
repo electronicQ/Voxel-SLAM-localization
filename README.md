@@ -233,24 +233,90 @@ rosbag play localization.bag --pause
 
 当 `use_prior_pose_for_btc: false` 时，先验位置以及半径、扩展和回退设置均不参与候选筛选，BTC 会直接进行全局搜索。
 
-#### 4.5.4 使用 RViz 设置初始位姿
+#### 4.5.4 BTC/RViz 双通道重定位
 
-当 `rviz_initialpose_enabled` 为 `true` 时，RViz 的 **2D Pose Estimate** 始终是一条独立的初始化路径：
+##### 双通道重定位总览
 
-- x、y 和 yaw 取自 RViz 输入，表示车辆当前在 `map` 坐标系中的位姿。
-- roll 和 pitch 取自实时 IMU 姿态。
-- z 取自 XY 平面内距离输入位置最近的历史关键帧高度。
-- 该路径跳过 BTC，但必须先加载输入位姿附近的核心空间块，并在连续 `direct_pose_validation_scans` 帧通过静态局部地图匹配验证后，定位才会生效。
-- 新的 RViz 位姿请求会替换尚未完成的旧请求。
+历史地图加载成功后，系统先进入 `LOCAL_ODOMETRY`：LiDAR-IMU 前端在临时里程计坐标系 `O` 中运行点到面 IESKF，并保留原有滑窗 BA，积累一段连续的当前 Session 轨迹。此时系统知道相对运动，但还不知道临时坐标系 `O` 在历史地图坐标系 `W` 中的位置。重定位的目标就是求出并应用 `T_W_O`。
 
-#### 4.5.5 定位状态与自动恢复
+系统提供两条相互独立、最终汇合的初始化通道：
+
+```text
+加载历史地图
+      ↓
+LOCAL_ODOMETRY（临时激光惯性里程计）
+      ↓
+ ┌───────────────┴────────────────┐
+ │                                │
+BTC 自动重定位通道           RViz 人工初始化通道
+ │                                │
+BTC + 平面 ICP + 会话对齐     人工位姿 + 局部地图连续验证
+ │                                │
+ └───────────────┬────────────────┘
+                 ↓
+           应用 T_W_O
+                 ↓
+       PREPARING_LOCAL_MAP
+                 ↓
+        加载邻域历史空间块
+                 ↓
+         IN_MAP_TRACKING
+```
+
+##### BTC 自动重定位通道
+
+BTC 通道不需要操作人员给出当前位置。系统将局部里程计窗口内的多帧点云统一变换到当前锚点坐标系，生成平面点云和 BTC 三角形描述子，再与地图包中的历史 BTC 数据库匹配。
+
+当 `use_prior_pose_for_btc: true` 时，历史关键帧位姿索引先查询 YAML 先验 x/y 周围 `btc_search_radius` 内的关键帧，只允许这些关键帧对应的 BTC 帧参加描述子投票。候选筛选不限制 yaw；失败后半径逐级扩大到 `btc_max_search_radius`，并可按配置回退到全局搜索。当 `use_prior_pose_for_btc: false` 时，BTC 直接使用全部历史 BTC 帧。
+
+BTC 命中候选后不会立即宣布定位成功，而是依次执行：
+
+1. 检查 BTC 分数和输出变换是否有效；
+2. 使用当前平面点云与候选历史平面点云执行 `icp_normal`，精修相对位姿并检查可观性；
+3. 以历史锚点为固定先验、当前 Session 的相邻里程计为连续约束、BTC/ICP 结果为跨 Session 约束，使用 GTSAM Levenberg–Marquardt 优化当前 Session；
+4. 从优化后的当前锚点计算 `T_W_O`，一次性修正 `x_curr`、滑窗状态、缓存轨迹以及高频预测后验快照。
+
+因此，当前自动通道是“BTC 候选检索 → 平面 ICP 验证与精修 → GTSAM LM 会话对齐”，不再使用原方案的 BnB 或 SE-Sync。跨 Session 约束通过并完成全局校正后，状态由 `RELOCALIZING`、`ALIGNING` 进入 `PREPARING_LOCAL_MAP`；核心空间块就绪后进入 `IN_MAP_TRACKING`，并令 `/localization/valid=true`。
+
+##### RViz 人工初始化通道
+
+当 `rviz_initialpose_enabled: true` 时，RViz 的 **2D Pose Estimate** 是一条始终可用的独立通道，它跳过 BTC，也不会用来修改 BTC 候选范围。系统按以下方式补全六自由度初始位姿：
+
+- x、y 和 yaw 取自 `/initialpose`，表示车辆当前在地图坐标系中的位姿；
+- roll 和 pitch 取自当前 IMU 姿态；
+- z 取自 XY 平面内距离输入位置最近的历史关键帧高度；
+- 当前局部里程计中的传感器位姿用于反求并应用 `T_W_O`。
+
+人工点击可能存在误差，因此 RViz 位姿本身不会直接令定位有效。应用变换后系统先加载输入位置附近的核心空间块，再用实时扫描与静态历史平面地图执行点到面 IESKF。只有连续 `direct_pose_validation_scans` 帧同时满足匹配点数、平均点到面残差和可观性阈值，状态才由 `PREPARING_LOCAL_MAP` 转为 `IN_MAP_TRACKING`。任一坏帧会把连续成功计数清零；超过 `direct_pose_validation_timeout_sec` 仍未通过则拒绝本次位姿、清理临时状态并返回 `LOCAL_ODOMETRY`。新的 RViz 请求会替换尚未完成的旧请求。
+
+##### 两条通道的公共汇合路径
+
+两条通道的差别只在于 `T_W_O` 的来源和验证方式；变换一旦通过各自的安全检查，后续都使用同一个空间块地图管理器。`PREPARING_LOCAL_MAP` 期间，管理器以地图坐标系下的当前位置为中心枚举附近规则块坐标，通过 `spatial_blocks.idx` 哈希索引查找非空块，并在后台从 `spatial_blocks.bin` 加载核心块。第一批核心块尚未就绪时只保留 IMU 传播，不把当前扫描插入历史地图，也不使用不完整局部地图产生激光后验。
+
+BTC 已经经过描述子、ICP 和会话对齐验证，所以核心块就绪后即可置为有效定位；RViz 只提供人工先验，因此核心块就绪后还必须完成连续多帧局部地图匹配验证。两条路径最终都以不可变空间块快照进入同一套连续定位前端。
+
+#### 4.5.5 连续定位状态与自动恢复
+
+##### 连续 in-map tracking
+
+进入 `IN_MAP_TRACKING` 后，系统不再向临时 Session 地图插入点，也不运行滑窗 BA。每帧处理顺序如下：
+
+1. 收集该帧激光时间范围内的 IMU，传播状态和协方差，并完成点云运动补偿；
+2. 根据当前位姿和速度预测位置请求 `load_radius` 内的空间块，同时预取车辆前方块；
+3. 从当前不可变空间块快照中的静态体素/八叉树平面查询点对应平面，构造点到面残差；
+4. 通过迭代误差状态卡尔曼滤波修正姿态、位置、速度和 IMU 偏置；
+5. 使用匹配点数、平均绝对点到面残差、法向矩阵最小特征值以及求解结果有限性判断本帧质量。
+
+车辆移动时只增量加载新进入范围的空间块，并在块超出更大的 `unload_radius` 后卸载，通过加载/卸载滞回避免边界抖动。系统不会逐帧遍历全部历史关键帧，也不会把所有历史点重新体素化或重建整张局部地图。若下一位置所需核心块仍在后台读取，本帧激光更新会回滚到 IMU 传播状态并等待地图，不使用残缺地图强行更新。
+
+##### 失效检测与自动恢复
 
 程序发布以下锁存状态话题：
 
-- `/localization/state`（`std_msgs/String`）：可能为 `WAITING_FOR_MAP`、`LOCAL_ODOMETRY`、`RELOCALIZING`、`ALIGNING`、`PREPARING_LOCAL_MAP`、`IN_MAP_TRACKING` 或 `LOST`。
-- `/localization/valid`（`std_msgs/Bool`）：只有 BTC 对齐成功或 RViz 初始位姿通过局部地图验证后才为 `true`。
+- `/localization/state`（`std_msgs/String`）：可能为 `WAITING_FOR_MAP`、`LOCAL_ODOMETRY`、`RELOCALIZING`、`ALIGNING`、`PREPARING_LOCAL_MAP`、`IN_MAP_TRACKING` 或 `LOST`；
+- `/localization/valid`（`std_msgs/Bool`）：只有 BTC 对齐和核心地图准备成功，或者 RViz 位姿通过连续局部地图验证后才为 `true`。
 
-`PREPARING_LOCAL_MAP` 表示全局位姿已经应用，但核心空间块尚未全部就绪，或者 RViz 位姿仍在连续扫描验证中。核心块加载期间只进行 IMU 传播，不把当前扫描插入静态地图。连续跟踪时若车辆进入尚未加载的区域，系统先回滚本帧激光更新并等待后台加载；缺口持续超过阈值、核心块损坏、坏帧达到阈值或求解出现非有限数值时进入 `LOST`。系统随后清理当前 Session 并返回局部里程计和 BTC 恢复流程，磁盘地图和历史 BTC 数据不变。
+连续坏帧达到阈值、状态出现 NaN/Inf、核心块损坏或地图缺口持续超过 `map_gap_timeout_sec` 时，状态机进入 `LOST`。系统将 `/localization/valid` 置为 `false`，停止默认导航里程计输出，清理当前 Session 和运行时空间块状态，然后返回 `LOCAL_ODOMETRY`，重新进行 BTC 自动重定位或等待新的 RViz 位姿；磁盘地图包和历史 BTC 数据始终保持只读。
 
 #### 4.5.6 定位结果与实时性评估
 
@@ -299,9 +365,35 @@ git diff --check
 
 #### 4.5.8 高频里程计与 ROS1 SCAN-Planner 接入
 
-正式状态估计仍使用原有的“收集一帧激光雷达时间范围内的 IMU → 去畸变 → IESKF 点到面更新”链路。新增的高频链路不会替代正式 IESKF，也不会把预测结果写回正式滤波器；它只从最近一次可靠后验复制状态，然后在独立 IMU callback queue 中按 IMU 频率前向传播均值，用于降低导航控制读取位姿时的时间延迟。
+同一条 IMU 消息会进入两条用途不同的处理路径。两条路径都使用该测量并不等于重复更新同一个滤波器：正式路径维护权威状态和协方差，高频路径只维护一个独立的短时状态均值副本，用于把最新可靠激光后验前向传播到最近 IMU 时间。
 
-定位模式默认只在 `/localization/valid=true` 后输出导航里程计。连续 `IN_MAP_TRACKING` 仍只使用不可变历史空间块地图进行 IESKF 更新，不运行滑窗 BA；重定位成功前的临时 `LOCAL_ODOMETRY` 阶段继续保留原有滑窗 BA。每次扫描 IESKF 后验、BA 写回或全局校正都会刷新高频预测快照。系统重置、定位进入 `LOST`、IMU 时间回退或节点退出会清空高频预测状态。
+##### 正式 IESKF 路径
+
+IMU callback 首先在互斥锁保护下将消息写入 `imu_buf`。主线程等待一帧激光及其时间范围内的 IMU 数据齐备后，批量执行 IMU 状态与协方差传播、点云去畸变和点到面 IESKF 迭代更新。这条路径生成系统唯一的权威后验；建图或重定位前的 `LOCAL_ODOMETRY` 还可能由滑窗 BA 写回最新状态，而连续 `IN_MAP_TRACKING` 只使用不可变历史空间块地图进行 IESKF 更新，不运行 BA。
+
+##### IMU 高频预测路径
+
+该 callback 本身运行在独立的单线程 IMU callback queue 上；完成正式缓冲后，它继续把时间戳、角速度和线加速度送入 `ImuRatePredictor`。预测器从最近权威后验 `(R, p, v, b_g, b_a, g)` 出发，对每条新 IMU 执行短时均值传播：
+
+```text
+ω = gyro - b_g
+a_world = R · (scale · accel - b_a) + g
+R ← R · Exp(ω·dt)
+p ← p + v·dt + 0.5·a_world·dt²
+v ← v + a_world·dt
+```
+
+快速预测不传播一套新的权威协方差，不参与激光去畸变或点到面残差计算，也绝不写回正式 IESKF。它发布 `/LIO/odom_imu` 和同时间戳的动态 TF `camera_init -> aft_mapped`，时间戳直接取 IMU 传感器时间而不是 `ros::Time::now()`，因此规划器能以接近 IMU 的频率读取当前预测位姿。
+
+##### 后验快照刷新与输出门控
+
+每次扫描 IESKF 得到可靠后验、滑窗 BA 写回最新状态或全局重定位校正成功后，系统都会用该后验刷新预测器。刷新时会保留并重放时间戳晚于后验的 IMU 尾队列，使输出从新的后验连续追赶到最新 IMU，而不是把输出时间倒退到激光时刻。如果尾队列不足以完整重放，快速链不会接管 TF，扫描频率 TF 会继续保底。
+
+定位模式默认只在 `/localization/valid=true` 后发布高频导航里程计。`max_prediction_sec` 限制最近激光后验之后允许的纯 IMU 外推时长，默认 0.5 秒；超过时停止快速输出并等待新后验，避免把长时间惯性漂移交给规划器。系统重置、进入 `LOST`、IMU 时间回退或节点退出都会清空预测状态。高频功能被关闭、尚无可用快照或快照重放被拒绝时，由扫描频率 TF 继续发布 `camera_init -> aft_mapped`，避免两个发布器同时争用同一动态 TF。
+
+##### 车辆里程计适配
+
+`/LIO/odom_imu` 描述的是 IMU 在地图坐标系中的状态。独立的 `scan_planner_odom_adapter` 从 TF 读取静态 `aft_mapped -> base_link` 安装外参，组合机体位姿，并使用角速度与杆臂计算 `base_link` 原点的世界系线速度，发布 `/LIO/odom_vehicle`。适配器不发布额外动态 TF，因而 TF 树仍由 Voxel-SLAM 的动态 `camera_init -> aft_mapped` 和用户 URDF 提供的静态 `aft_mapped -> base_link` 组成。
 
 `Odometry` 下的配置默认值为：
 
