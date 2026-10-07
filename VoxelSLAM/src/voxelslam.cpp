@@ -1,6 +1,7 @@
 #include "voxelslam.hpp"
 #include "global_correction.hpp"
 #include "btc_io.hpp"
+#include "imu_rate_predictor.hpp"
 #include "localization_state.hpp"
 #include "mapping_capture.hpp"
 #include "prior_map_tracker.hpp"
@@ -10,10 +11,14 @@
 #include "spatial_map_matcher.hpp"
 
 #include <geometry_msgs/PoseWithCovarianceStamped.h>
+#include <nav_msgs/Odometry.h>
+#include <ros/callback_queue.h>
+#include <ros/spinner.h>
 #include <std_msgs/Bool.h>
 #include <std_msgs/String.h>
 
 #include <atomic>
+#include <boost/bind.hpp>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -77,8 +82,10 @@ public:
     return inst;
   }
 
-  void pub_odom_func(IMUST &xc)
+  void pub_odom_func(IMUST &xc, bool publish_scan_tf,
+                     const string &odom_frame, const string &child_frame)
   {
+    if(!publish_scan_tf) return;
     Eigen::Quaterniond q_this(xc.R);
     Eigen::Vector3d t_this = xc.p;
 
@@ -91,13 +98,17 @@ public:
     q.setY(q_this.y());
     q.setZ(q_this.z());
     transform.setRotation(q);
-    ros::Time ct = ros::Time::now();
-    br.sendTransform(tf::StampedTransform(transform, ct, "/camera_init", "/aft_mapped"));
+    ros::Time ct = ros::Time::fromSec(xc.t);
+    br.sendTransform(
+        tf::StampedTransform(transform, ct, odom_frame, child_frame));
   }
 
-  void pub_localtraj(PLV(3) &pwld, double jour, IMUST &x_curr, int cur_session, pcl::PointCloud<PointType> &pcl_path)
+  void pub_localtraj(PLV(3) &pwld, double jour, IMUST &x_curr,
+                     int cur_session, pcl::PointCloud<PointType> &pcl_path,
+                     bool publish_scan_tf, const string &odom_frame,
+                     const string &child_frame)
   {
-    pub_odom_func(x_curr);
+    pub_odom_func(x_curr, publish_scan_tf, odom_frame, child_frame);
     pcl::PointCloud<PointType> pcl_send;
     pcl_send.reserve(pwld.size());
     for(Eigen::Vector3d &pw: pwld)
@@ -839,6 +850,20 @@ public:
   PriorMapTracker prior_map_tracker;
   std::atomic<bool> prior_map_ready{false};
   std::atomic<bool> localization_valid{false};
+  bool imu_rate_output = true;
+  bool publish_before_localized = false;
+  string imu_odom_topic = "/LIO/odom_imu";
+  string odom_frame = "camera_init";
+  string imu_child_frame = "aft_mapped";
+  double max_prediction_sec = 0.5;
+  ImuRatePredictor imu_rate_predictor;
+  std::atomic<bool> imu_prediction_ready{false};
+  mutex imu_output_mutex;
+  ros::CallbackQueue imu_callback_queue;
+  ros::Subscriber sub_imu;
+  ros::Publisher pub_imu_odom;
+  tf::TransformBroadcaster imu_tf_broadcaster;
+  std::unique_ptr<ros::AsyncSpinner> imu_spinner;
   mutex frontend_pipeline_mutex;
   mutex localization_state_mutex;
   LocalizationStateMachine localization_machine;
@@ -1008,7 +1033,6 @@ public:
       throw std::invalid_argument("invalid map block settings");
     }
 
-    sub_imu = n.subscribe(imu_topic, 80000, imu_handler);
     if(feat.lidar_type == LIVOX)
       sub_pcl = n.subscribe<livox_ros_driver::CustomMsg>(lid_topic, 1000, pcl_handler);
     else
@@ -1038,7 +1062,26 @@ public:
     n.param<double>("Odometry/min_eigen_value", min_eigen_value, 0.0025);
     n.param<int>("Odometry/degrade_bound", degrade_bound, 10);
     n.param<int>("Odometry/point_notime", point_notime, 0);
+    n.param<bool>("Odometry/imu_rate_output", imu_rate_output, true);
+    n.param<string>("Odometry/imu_odom_topic", imu_odom_topic,
+                    "/LIO/odom_imu");
+    n.param<string>("Odometry/odom_frame", odom_frame, "camera_init");
+    n.param<string>("Odometry/imu_child_frame", imu_child_frame,
+                    "aft_mapped");
+    n.param<bool>("Odometry/publish_before_localized",
+                  publish_before_localized, false);
+    n.param<double>("Odometry/max_prediction_sec", max_prediction_sec, 0.5);
+    if(imu_odom_topic.empty() || odom_frame.empty() ||
+       imu_child_frame.empty() || !std::isfinite(max_prediction_sec) ||
+       max_prediction_sec <= 0.0)
+    {
+      ROS_FATAL("Invalid Odometry IMU-rate output settings.");
+      throw std::invalid_argument("invalid IMU-rate odometry settings");
+    }
     odom_ekf.point_notime = point_notime;
+    imu_rate_predictor.setEnabled(imu_rate_output);
+    imu_rate_predictor.setMaxPredictionSec(max_prediction_sec);
+    pub_imu_odom = n.advertise<nav_msgs::Odometry>(imu_odom_topic, 1000);
 
     feat.blind = feat.blind * feat.blind;
     odom_ekf.cov_gyr << cov_gyr, cov_gyr, cov_gyr;
@@ -1092,6 +1135,182 @@ public:
 
     sws.resize(thread_num);
     cout << "bagname: " << bagname << endl;
+
+    ros::SubscribeOptions imu_options =
+        ros::SubscribeOptions::create<sensor_msgs::Imu>(
+            imu_topic, 80000,
+            boost::bind(&VOXEL_SLAM::imu_callback, this, _1),
+            ros::VoidPtr(), &imu_callback_queue);
+    sub_imu = n.subscribe(imu_options);
+    imu_spinner.reset(new ros::AsyncSpinner(1, &imu_callback_queue));
+    imu_spinner->start();
+  }
+
+  ~VOXEL_SLAM()
+  {
+    shutdown_imu_rate_output();
+  }
+
+  bool publish_scan_tf() const
+  {
+    return !imu_rate_output || !imu_prediction_ready.load();
+  }
+
+  void reset_imu_rate_predictor_locked()
+  {
+    imu_prediction_ready.store(false);
+    imu_rate_predictor.reset();
+  }
+
+  void reset_imu_rate_predictor()
+  {
+    lock_guard<mutex> output_lock(imu_output_mutex);
+    reset_imu_rate_predictor_locked();
+  }
+
+  void shutdown_imu_rate_output()
+  {
+    sub_imu.shutdown();
+    if(imu_spinner) imu_spinner->stop();
+    reset_imu_rate_predictor();
+  }
+
+  void refresh_imu_rate_predictor_snapshot()
+  {
+    if(!imu_rate_output) return;
+    if(!std::isfinite(imupre_scale_gravity) ||
+       !std::isfinite(x_curr.t) || !x_curr.R.array().isFinite().all() ||
+       !x_curr.p.array().isFinite().all() ||
+       !x_curr.v.array().isFinite().all() ||
+       !x_curr.bg.array().isFinite().all() ||
+       !x_curr.ba.array().isFinite().all() ||
+       !x_curr.g.array().isFinite().all() ||
+       !x_curr.cov.array().isFinite().all())
+    {
+      reset_imu_rate_predictor();
+      return;
+    }
+
+    lock_guard<mutex> output_lock(imu_output_mutex);
+    imu_rate_predictor.updateSnapshot(x_curr, imupre_scale_gravity);
+    imu_prediction_ready.store(true);
+  }
+
+  void publish_imu_rate_odometry(const ImuRatePrediction &prediction)
+  {
+    nav_msgs::Odometry odometry;
+    odometry.header.stamp =
+        ros::Time::fromSec(prediction.state.t);
+    odometry.header.frame_id = odom_frame;
+    odometry.child_frame_id = imu_child_frame;
+
+    Eigen::Quaterniond orientation(prediction.state.R);
+    orientation.normalize();
+    odometry.pose.pose.position.x = prediction.state.p.x();
+    odometry.pose.pose.position.y = prediction.state.p.y();
+    odometry.pose.pose.position.z = prediction.state.p.z();
+    odometry.pose.pose.orientation.x = orientation.x();
+    odometry.pose.pose.orientation.y = orientation.y();
+    odometry.pose.pose.orientation.z = orientation.z();
+    odometry.pose.pose.orientation.w = orientation.w();
+    odometry.twist.twist.linear.x = prediction.state.v.x();
+    odometry.twist.twist.linear.y = prediction.state.v.y();
+    odometry.twist.twist.linear.z = prediction.state.v.z();
+    odometry.twist.twist.angular.x =
+        prediction.unbiased_angular_velocity.x();
+    odometry.twist.twist.angular.y =
+        prediction.unbiased_angular_velocity.y();
+    odometry.twist.twist.angular.z =
+        prediction.unbiased_angular_velocity.z();
+
+    for(int index = 0; index < 36; ++index)
+    {
+      odometry.pose.covariance[index] = 0.0;
+      odometry.twist.covariance[index] = 0.0;
+    }
+    for(int row = 0; row < 3; ++row)
+    {
+      for(int column = 0; column < 3; ++column)
+      {
+        odometry.pose.covariance[row * 6 + column] =
+            prediction.state.cov(3 + row, 3 + column);
+        odometry.pose.covariance[row * 6 + 3 + column] =
+            prediction.state.cov(3 + row, column);
+        odometry.pose.covariance[(3 + row) * 6 + column] =
+            prediction.state.cov(row, 3 + column);
+        odometry.pose.covariance[(3 + row) * 6 + 3 + column] =
+            prediction.state.cov(row, column);
+      }
+      odometry.twist.covariance[row * 6 + row] = -1.0;
+      odometry.twist.covariance[(3 + row) * 6 + 3 + row] = -1.0;
+    }
+
+    pub_imu_odom.publish(odometry);
+
+    tf::Transform transform;
+    transform.setOrigin(tf::Vector3(prediction.state.p.x(),
+                                    prediction.state.p.y(),
+                                    prediction.state.p.z()));
+    tf::Quaternion tf_orientation;
+    tf_orientation.setX(orientation.x());
+    tf_orientation.setY(orientation.y());
+    tf_orientation.setZ(orientation.z());
+    tf_orientation.setW(orientation.w());
+    transform.setRotation(tf_orientation);
+    imu_tf_broadcaster.sendTransform(tf::StampedTransform(
+        transform, odometry.header.stamp, odom_frame, imu_child_frame));
+  }
+
+  void imu_callback(const sensor_msgs::Imu::ConstPtr &msg_in)
+  {
+    if(!msg_in) return;
+    static int first_message = 1;
+    if(first_message)
+    {
+      first_message = 0;
+      printf("Time0: %lf\n", msg_in->header.stamp.toSec());
+    }
+
+    sensor_msgs::Imu::Ptr msg(new sensor_msgs::Imu(*msg_in));
+    const double timestamp = msg->header.stamp.toSec();
+    bool timestamp_rollback = false;
+    {
+      lock_guard<mutex> lock(mBuf);
+      timestamp_rollback =
+          imu_last_time >= 0.0 && timestamp < imu_last_time;
+      if(timestamp_rollback) imu_buf.clear();
+      imu_last_time = timestamp;
+      imu_buf.push_back(msg);
+    }
+
+    ImuRateSample sample;
+    sample.t = timestamp;
+    sample.gyro << msg->angular_velocity.x, msg->angular_velocity.y,
+                   msg->angular_velocity.z;
+    sample.accel << msg->linear_acceleration.x, msg->linear_acceleration.y,
+                    msg->linear_acceleration.z;
+    lock_guard<mutex> output_lock(imu_output_mutex);
+    if(timestamp_rollback)
+    {
+      ROS_WARN("IMU timestamp rolled back; resetting IMU-rate prediction.");
+      reset_imu_rate_predictor_locked();
+    }
+    const ImuRatePrediction prediction = imu_rate_predictor.pushImu(sample);
+    if(!prediction.publishable) return;
+
+    if(!imu_prediction_ready.load()) return;
+    if(operation_mode == "localization" && !publish_before_localized &&
+       !localization_valid.load())
+      return;
+    publish_imu_rate_odometry(prediction);
+  }
+
+  void publish_localtraj(PLV(3) &pwld, double jour, IMUST &state,
+                         int cur_session)
+  {
+    ResultOutput::instance().pub_localtraj(
+        pwld, jour, state, cur_session, pcl_path, publish_scan_tf(),
+        odom_frame, imu_child_frame);
   }
 
   void initialpose_callback(
@@ -1278,6 +1497,7 @@ public:
     }
     has_global_correction_generation = true;
     global_correction_generation = targets.last_applied_generation;
+    refresh_imu_rate_predictor_snapshot();
     return true;
   }
 
@@ -1833,7 +2053,7 @@ public:
     win_count++;
     x_buf.push_back(x_curr);
     pvec_buf.push_back(pptr);
-    ResultOutput::instance().pub_localtraj(pwld, 0, x_curr, sessionNames.size()-1, pcl_path);
+    publish_localtraj(pwld, 0, x_curr, sessionNames.size()-1);
 
     if(win_count > 1)
     {
@@ -1870,6 +2090,7 @@ public:
 
   void system_reset(deque<sensor_msgs::Imu::Ptr> &imus)
   {
+    reset_imu_rate_predictor();
     string epoch_error;
     if(!frontend_session_epoch.advance(epoch_error))
     {
@@ -2074,6 +2295,7 @@ public:
       is_finish.store(finish_requested);
       if(finish_requested)
       {
+        shutdown_imu_rate_output();
         break;
       }
 
@@ -2167,6 +2389,7 @@ public:
         {
           motion_init_flag = 0;
           imu_orientation_ready = true;
+          refresh_imu_rate_predictor_snapshot();
         }
         else
         {
@@ -2306,8 +2529,8 @@ public:
             // IMU-only propagation while the first immutable core is loading.
             pwld.clear();
             pvec_update(pptr, x_curr, pwld);
-            ResultOutput::instance().pub_localtraj(
-                pwld, jour, x_curr, sessionNames.size()-1, pcl_path);
+            publish_localtraj(
+                pwld, jour, x_curr, sessionNames.size()-1);
             continue;
           }
 
@@ -2365,6 +2588,10 @@ public:
           {
             map_gap_started_sec = -1.0;
           }
+
+          if(!loading_required_core && scan_quality.solve_succeeded &&
+             scan_quality.finite)
+            refresh_imu_rate_predictor_snapshot();
 
           if(tracking_good)
           {
@@ -2437,8 +2664,8 @@ public:
 
           pwld.clear();
           pvec_update(pptr, x_curr, pwld);
-          ResultOutput::instance().pub_localtraj(
-              pwld, jour, x_curr, sessionNames.size()-1, pcl_path);
+          publish_localtraj(
+              pwld, jour, x_curr, sessionNames.size()-1);
 
           const SpatialMapStatus diagnostic_status =
               spatial_map_manager->status();
@@ -2464,17 +2691,21 @@ public:
           continue;
         }
 
-        if(lio_state_estimation(pptr, &scan_quality))
+        const bool scan_update_good =
+            lio_state_estimation(pptr, &scan_quality);
+        if(scan_update_good)
         {
           if(degrade_cnt > 0) degrade_cnt--;
         }
         else
           degrade_cnt++;
         last_tracking_quality = scan_quality;
+        if(scan_quality.solve_succeeded && scan_quality.finite)
+          refresh_imu_rate_predictor_snapshot();
 
         pwld.clear();
         pvec_update(pptr, x_curr, pwld);
-        ResultOutput::instance().pub_localtraj(pwld, jour, x_curr, sessionNames.size()-1, pcl_path);
+        publish_localtraj(pwld, jour, x_curr, sessionNames.size()-1);
 
         t1 = ros::Time::now().toSec();
 
@@ -2544,6 +2775,7 @@ public:
 
         x_curr.R = x_buf[win_count-1].R;
         x_curr.p = x_buf[win_count-1].p;
+        refresh_imu_rate_predictor_snapshot();
         t5 = ros::Time::now().toSec();
 
         ResultOutput::instance().pub_localmap(mgsize, sessionNames.size()-1, pvec_buf, x_buf, pcl_path, win_base, win_count);

@@ -18,6 +18,12 @@ General:
   is_save_map: 0
 
 Odometry:
+  imu_rate_output: true
+  imu_odom_topic: "/LIO/odom_imu"
+  odom_frame: "camera_init"
+  imu_child_frame: "aft_mapped"
+  publish_before_localized: false
+  max_prediction_sec: 0.5
   max_init: 30
   cov_gyr: 0.1
   cov_acc: 1

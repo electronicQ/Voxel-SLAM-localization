@@ -26,7 +26,7 @@ using namespace std;
 
 ros::Publisher pub_scan, pub_cmap, pub_init, pub_pmap;
 ros::Publisher pub_test, pub_prev_path, pub_curr_path;
-ros::Subscriber sub_imu, sub_pcl;
+ros::Subscriber sub_pcl;
 
 template <typename T>
 void pub_pl_func(T &pl, ros::Publisher &pub)
@@ -48,30 +48,6 @@ deque<double> time_buf;
 double imu_last_time = -1;
 int point_notime = 0;
 double last_pcl_time = -1;
-
-void imu_handler(const sensor_msgs::Imu::ConstPtr &msg_in)
-{
-  static int flag = 1;
-  if(flag)
-  {
-    flag = 0;
-    printf("Time0: %lf\n", msg_in->header.stamp.toSec());
-  }
-
-  sensor_msgs::Imu::Ptr msg(new sensor_msgs::Imu(*msg_in));
-
-  // For Hilti 2022 exp03
-  // double t0 = 1646320760 + 255.5;
-  // double t1 = 1646320760 + 256.2;
-  // double tc = msg->header.stamp.toSec();
-  // if(tc > t0 && tc < t1)
-  //   msg->linear_acceleration.z = -9.7;
-
-  mBuf.lock();
-  imu_last_time = msg->header.stamp.toSec();
-  imu_buf.push_back(msg);
-  mBuf.unlock();
-}
 
 template<class T>
 void pcl_handler(T &msg)
@@ -108,13 +84,13 @@ bool sync_packages(pcl::PointCloud<PointType>::Ptr &pl_ptr, deque<sensor_msgs::I
 
   if(!pl_ready)
   {
-    if(pcl_buf.empty()) return false;
-
-    mBuf.lock();
-    pl_ptr = pcl_buf.front();
-    p_imu.pcl_beg_time = time_buf.front();
-    pcl_buf.pop_front(); time_buf.pop_front();
-    mBuf.unlock();
+    {
+      lock_guard<mutex> lock(mBuf);
+      if(pcl_buf.empty()) return false;
+      pl_ptr = pcl_buf.front();
+      p_imu.pcl_beg_time = time_buf.front();
+      pcl_buf.pop_front(); time_buf.pop_front();
+    }
 
     p_imu.pcl_end_time = p_imu.pcl_beg_time + pl_ptr->back().curvature;
 
@@ -134,22 +110,21 @@ bool sync_packages(pcl::PointCloud<PointType>::Ptr &pl_ptr, deque<sensor_msgs::I
     pl_ready = true;
   }
 
-  if(!pl_ready || imu_last_time <= p_imu.pcl_end_time) return false;
-
-  mBuf.lock();
-  double imu_time = imu_buf.front()->header.stamp.toSec();
-  while((!imu_buf.empty()) && (imu_time < p_imu.pcl_end_time)) 
   {
-    imu_time = imu_buf.front()->header.stamp.toSec();
-    if(imu_time > p_imu.pcl_end_time) break;
-    imus.push_back(imu_buf.front());
-    imu_buf.pop_front();
-  }
-  mBuf.unlock();
+    lock_guard<mutex> lock(mBuf);
+    if(!pl_ready || imu_buf.empty() ||
+       imu_last_time <= p_imu.pcl_end_time)
+      return false;
 
-  if(imu_buf.empty())
-  {
-    printf("imu buf empty\n"); exit(0);
+    while(!imu_buf.empty())
+    {
+      const double imu_time = imu_buf.front()->header.stamp.toSec();
+      // Preserve the original batching boundary: the IMU sample exactly at
+      // the scan end belongs to this scan; only a later sample stays queued.
+      if(imu_time > p_imu.pcl_end_time) break;
+      imus.push_back(imu_buf.front());
+      imu_buf.pop_front();
+    }
   }
 
   pl_ready = false;
