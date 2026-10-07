@@ -164,9 +164,9 @@ roslaunch voxel_slam vxlm_mid360.launch
 rosbag play jungle_challenge.bag --pause
 ```
 
-### 4.5 构建可复用地图并进行定位
+### 4.5 定位
 
-建图和定位使用同一个 `voxelslam` 可执行程序。
+本节统一介绍定位地图的构建与转换、定位启动、双通道重定位、连续跟踪、结果评估以及导航接口。建图和定位使用同一个 `voxelslam` 可执行程序。
 
 #### 4.5.1 导出定位地图
 
