@@ -65,6 +65,7 @@ add_library(voxel_slam_map_io
   src/global_correction.cpp
   src/localization_state.cpp
   src/imu_rate_predictor.cpp
+  src/vehicle_odom_transform.cpp
 )
 target_include_directories(voxel_slam_map_io PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -92,11 +93,33 @@ target_link_libraries(build_spatial_map
   ${Boost_LIBRARIES}
 )
 
-install(TARGETS build_spatial_map
+add_executable(scan_planner_odom_adapter
+  src/scan_planner_odom_adapter.cpp
+)
+target_link_libraries(scan_planner_odom_adapter
+  voxel_slam_map_io
+  ${catkin_LIBRARIES}
+)
+
+install(TARGETS build_spatial_map scan_planner_odom_adapter
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
+install(DIRECTORY config launch
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)
+
 if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(vehicle_odom_transform_test
+    test/vehicle_odom_transform_test.cpp
+  )
+  if(TARGET vehicle_odom_transform_test)
+    target_link_libraries(vehicle_odom_transform_test
+      voxel_slam_map_io
+      ${catkin_LIBRARIES}
+    )
+  endif()
+
   catkin_add_gtest(imu_rate_predictor_test
     test/imu_rate_predictor_test.cpp
   )

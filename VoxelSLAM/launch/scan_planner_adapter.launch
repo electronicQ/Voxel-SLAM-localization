@@ -1,0 +1,10 @@
+<launch>
+  <arg name="config" default="$(find voxel_slam)/config/scan_planner_adapter.yaml" />
+
+  <node pkg="voxel_slam"
+        type="scan_planner_odom_adapter"
+        name="scan_planner_odom_adapter"
+        output="screen">
+    <rosparam command="load" file="$(arg config)" />
+  </node>
+</launch>
