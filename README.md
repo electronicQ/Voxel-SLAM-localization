@@ -34,12 +34,14 @@
 - [PCL 1.10](https://pointclouds.org/)；
 - [Eigen 3.3.7](https://eigen.tuxfamily.org/index.php?title=Main_Page)；
 - [GTSAM 4.0.3](https://github.com/borglab/gtsam/releases?page=2)；
+- Boost `filesystem` 与 `system`；
 - [livox_ros_driver](https://github.com/Livox-SDK/livox_ros_driver)。
 
-先将当前仓库检出到 `~/catkin_ws/src/Voxel-SLAM`，再从 catkin 工作空间编译：
+先将当前仓库检出到 `~/catkin_ws/src/Voxel-SLAM`。建议先让 `rosdep` 补齐可解析的 ROS/系统依赖，再从 catkin 工作空间编译：
 
 ```bash
 cd ~/catkin_ws
+rosdep install --from-paths src --ignore-src -r -y
 catkin_make
 source devel/setup.bash
 ```
@@ -138,6 +140,8 @@ launch 会加载定位配置，强制 `General/mode=localization`，并保持 `G
 
 若自动通道未成功，或需要人工指定位置，可在 RViz 中使用 **2D Pose Estimate**。配置项 `rviz_initialpose_enabled: true` 时，该入口始终可用。输入的 x/y/yaw 会与当前 IMU 的 roll/pitch、最近历史关键帧的 z 组合，并经过连续局部地图匹配验证；它不会修改 BTC 候选范围。
 
+仓库自带的 `VoxelSLAM/rviz_cfg/back.rviz` 默认 RViz Fixed Frame 是 `camera_init`，因此默认流程无需额外发布 `map -> camera_init` TF。默认且推荐的 frame 是 `camera_init`。`map` 和 `/map` 仅作为数值坐标与 `camera_init` 完全相同的兼容别名；`InitialPoseRequestBuffer` 不查询 TF，也不执行 `map -> camera_init` 变换。若外部系统中的 `map` 与 `camera_init` 存在非恒等变换，必须先把位姿转换到 `camera_init` 后再发布，不能直接使用 `map` 别名。
+
 ### 4.6 检查定位状态
 
 ```bash
@@ -156,34 +160,85 @@ rostopic echo /localization/valid
 
 ### 4.7 接入 SCAN-Planner（可选）
 
-先由机器人描述提供静态 `aft_mapped -> base_link` 外参。以下四个前台进程分别在终端 1/2/3/4 中启动并保持运行；不要等待前一个 `roslaunch` 退出后再执行下一个。
+本仓库没有 vendored SCAN-Planner；它是独立的外部工程，官方仓库为 [wuyi2121/SCAN-Planner](https://github.com/wuyi2121/SCAN-Planner)。可以把它克隆到同一个 catkin 工作空间的 `src/` 后一起编译，此时每个新终端执行：
 
-终端 1 启动用户工程的机器人描述：
+```bash
+source ~/catkin_ws/devel/setup.bash
+```
+
+也可以在单独的 catkin 工作空间编译，并把它作为独立 overlay 叠加到 Voxel-SLAM 工作空间；此时每个新终端依次执行：
+
+```bash
+source ~/catkin_ws/devel/setup.bash
+source ~/scan_planner_ws/devel/setup.bash
+```
+
+下面的接入步骤和参数来自接口静态核对，尚未在本仓库的 Windows 环境完成 Ubuntu/ROS 联调。用户自己的机器人描述需要提供静态 `aft_mapped -> base_link` 外参。每个前台进程应分别在独立终端启动并保持运行。
+
+上游 `run.launch` 无条件设置 Go2 的 `robot_description`，并启动名为 `go2_robot_state_publisher` 的 `robot_state_publisher`。使用自己的 URDF 时，应先把该 launch 复制到用户 bringup 包并裁剪 Go2 model 段，再启动下面的用户机器人描述；不要重复启动 `robot_state_publisher`，也不要让上游 launch 覆盖用户的 `robot_description`。
+
+#### 模式 A：沿用 4.4 已启动的定位会话
+
+若 4.4–4.6 的 Voxel-SLAM 定位进程和传感器/rosbag 输入仍在运行，不得再次启动 `vxlm_localization_mid360.launch`，否则同名节点可能顶掉现有会话。保持现有 Voxel-SLAM 和传感器/rosbag 输入，仅新增或确认以下三个进程：
+
+1. **用户 URDF**：确认用户工程的机器人描述及其 `robot_state_publisher` 已运行；若尚未运行，再执行：
 
 ```bash
 roslaunch your_robot_description robot_description.launch
 ```
 
-终端 2 启动 Voxel-SLAM 定位：
+2. **adapter**：启动 `scan_planner_odom_adapter`：
+
+```bash
+roslaunch voxel_slam scan_planner_adapter.launch
+```
+
+3. **裁剪后的 SCAN-Planner**：使用上述已复制并裁剪的 launch 启动；命令中的 launch 名称按用户 bringup 包实际名称替换：
+
+```bash
+roslaunch your_robot_bringup scan_planner_voxelslam.launch \
+  is_real_world:=true sensor_type:=lidar
+```
+
+#### 模式 B：从零启动实机完整栈
+
+从零启动时，在五个独立终端中各启动一次以下进程，不要重复启动同名节点：
+
+1. **传感器驱动/输入**：下面的 `your_lidar_driver` 和 launch 文件都是占位符，须按实际设备替换：
+
+```bash
+roslaunch your_lidar_driver your_lidar.launch
+```
+
+2. **用户 URDF**：
+
+```bash
+roslaunch your_robot_description robot_description.launch
+```
+
+3. **Voxel-SLAM 定位**：
 
 ```bash
 roslaunch voxel_slam vxlm_localization_mid360.launch \
   map_path:=/absolute/path/to/v2_map
 ```
 
-终端 3 启动车体里程计适配器：
+4. **adapter**：启动 `scan_planner_odom_adapter`：
 
 ```bash
 roslaunch voxel_slam scan_planner_adapter.launch
 ```
 
-终端 4 在完成下述接口修改后启动 SCAN-Planner：
+5. **裁剪后的 SCAN-Planner**：
 
 ```bash
-roslaunch scan_planner run.launch is_real_world:=true sensor_type:=lidar
+roslaunch your_robot_bringup scan_planner_voxelslam.launch \
+  is_real_world:=true sensor_type:=lidar
 ```
 
-本工程的 `/map_scan` 已在世界系，SCAN-Planner 不应再次施加传感器外参。其 `run.launch`/`advanced_param.xml` 需要使用等价设置：
+`cloud_is_world` 与 `need_extrinsic` 是两个彼此独立的开关：前者决定输入点云是否还需由传感器系变换到世界系，后者决定输入位姿是否还需转换到 LiDAR 射线原点。本工程的 `/map_scan` 已在 `camera_init` 世界系，因此保持 `cloud_is_world=true`；但 `/LIO/odom_imu` 是 IMU 位姿，作为 `sensor_pose_topic` 时仍须保持 `need_extrinsic=true`，用 LiDAR→IMU 外参得到射线原点。
+
+默认 Mid-360 外参平移为 `[-0.011, -0.02329, 0.04412]`、旋转为单位旋转。SCAN-Planner 当前在 `src/planner/plan_env/src/grid_map.cpp` 的 `mp_.lidar_extrinsic_` 中定义该矩阵；它必须与 `VoxelSLAM/config/localization_mid360.yaml` 的 `General/extrinsic_tran` 和 `General/extrinsic_rota` 一致。如果更换安装方式，两个工程必须同步修改。复制后的 `run.launch`/`advanced_param.xml` 需要使用等价设置：
 
 ```text
 body_pose_topic=/LIO/odom_vehicle
@@ -191,7 +246,7 @@ sensor_pose_topic=/LIO/odom_imu
 cloud_topic=/map_scan
 grid_map/frame_id=camera_init
 grid_map/cloud_is_world=true
-grid_map/need_extrinsic=false
+grid_map/need_extrinsic=true
 ```
 
 ROS1 launch 关键项为：
@@ -200,7 +255,7 @@ ROS1 launch 关键项为：
 <arg name="cloud_topic" value="/map_scan"/>
 <arg name="cloud_is_world" value="true"/>
 <param name="grid_map/frame_id" value="camera_init" type="str"/>
-<param name="grid_map/need_extrinsic" value="false" type="bool"/>
+<param name="grid_map/need_extrinsic" value="true" type="bool"/>
 ```
 
 ## 5. 建图与地图准备原理
@@ -310,6 +365,8 @@ T_W_O = T_W_C × inverse(T_O_C)
 ### 6.4 RViz 人工初始化
 
 当 `rviz_initialpose_enabled: true` 时，RViz **2D Pose Estimate** 是始终可用的独立入口，它跳过 BTC，也不修改 BTC 候选范围。系统按以下方式补全六自由度初始位姿：
+
+默认且推荐的 frame 是 `camera_init`。`map` 和 `/map` 仅作为数值坐标与 `camera_init` 完全相同的兼容别名；`InitialPoseRequestBuffer` 不查询 TF，也不执行 `map -> camera_init` 变换。若外部系统中的 `map` 与 `camera_init` 存在非恒等变换，必须先把位姿转换到 `camera_init` 后再发布，不能直接使用 `map` 别名。
 
 - x、y、yaw 来自 `/initialpose`；
 - roll、pitch 来自当前 IMU 姿态；
@@ -474,7 +531,7 @@ py -3.12 -m unittest discover -s VoxelSLAM/test -p "*_test.py"
 - `/localization/valid` 为 `false`：默认不会输出导航里程计；先处理重定位或跟踪质量问题，不要绕过有效性门控。
 - 只有 `/LIO/odom_imu`、没有 `/LIO/odom_vehicle`：检查适配器是否启动、`aft_mapped -> base_link` 静态 TF 的方向和 frame 名称，以及适配器节流告警。
 - 高频输出约 0.5 秒后停止：检查新的激光权威后验是否持续到达，不应首先放大 `max_prediction_sec`。
-- SCAN-Planner 中点云重复变换：确认 `/map_scan` 配置为世界系点云，并设置 `cloud_is_world=true`、`need_extrinsic=false`。
+- SCAN-Planner 中点云或射线原点异常：确认 `/map_scan` 是世界系点云并设置 `cloud_is_world=true`；若 `sensor_pose_topic=/LIO/odom_imu`，同时保持 `need_extrinsic=true`，并核对 Mid-360 外参与 Voxel-SLAM 配置一致。
 
 ## 11. 上游项目与致谢
 

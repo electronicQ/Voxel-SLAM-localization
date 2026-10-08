@@ -4,13 +4,13 @@
 
 **Goal:** 将根 README 重写为当前 Voxel-SLAM 二次开发工程的公开技术文档，使读者先完成运行，再理解建图、双通道重定位、空间块连续定位和高频里程计原理。
 
-**Architecture:** 仅修改根目录 `README.md`，以“项目说明—运行流程—技术方案—接口与验证—上游致谢”为主线。保留现有双通道重定位总览和 BTC 完整链路的全部技术信息，但改用正式工程标题并消除重复内容。
+**Architecture:** Task 1 仅重构根目录 `README.md`，以“项目说明—运行流程—技术方案—接口与验证—上游致谢”为主线。Task 2 因审查允许在 `localization_state.cpp` 中做最小 frame 接受兼容修改并补充 Python/C++ 测试；除该 frame 契约外，不改变其他程序行为。
 
 **Tech Stack:** Markdown、ROS1 Noetic、Voxel-SLAM、PowerShell/`rg` 文档契约检查、Python 3.12 单元测试。
 
 ## Global Constraints
 
-- 本次不修改 C++、Python、YAML、launch 或构建行为。
+- Task 1 仅修改文档；Task 2 允许修改 `localization_state.cpp` 的最小 frame 接受逻辑及对应测试，不允许其他程序、YAML、launch 或构建行为变化。
 - README 第一屏必须明确声明本项目基于上游 Voxel-SLAM 二次开发。
 - 运行流程必须位于技术原理之前，并按建图、地图导出、定位、有效性检查、导航接入的顺序编写。
 - 必须完整保留“双通道重定位总览”和 BTC 自动重定位完整链路的流程、坐标系、公式和 GTSAM 优化边界。
@@ -37,7 +37,7 @@
 - Consumes: 当前配置中的模式、地图路径、BTC、RViz、空间块和里程计参数；当前代码发布的话题与 TF frame。
 - Produces: 一份可独立指导建图、定位和导航接入的中文根 README。
 
-- [ ] **Step 1: 运行重构前文档契约检查并确认当前结构不满足要求**
+- [x] **Step 1: 运行重构前文档契约检查并确认当前结构不满足要求**
 
 Run:
 
@@ -48,7 +48,7 @@ rg -n "面试速记" README.md
 
 Expected: 第一条无匹配；第二条匹配现有“面试速记：BTC 重定位完整链路”，证明新标题和正式措辞尚未落实。
 
-- [ ] **Step 2: 用项目化结构重写 `README.md`**
+- [x] **Step 2: 用项目化结构重写 `README.md`**
 
 README 使用以下一级、二级结构，标题文字保持一致：
 
@@ -99,7 +99,7 @@ T_W_O = T_W_C × inverse(T_O_C)
 - “参数、话题与 TF”集中列出 `/localization/state`、`/localization/valid`、`/map_scan`、`/map_path`、`/LIO/odom_imu`、`/LIO/odom_vehicle` 与 `camera_init -> aft_mapped -> base_link`。
 - “上游项目与致谢”保留上游 GitHub、arXiv、YouTube、HILTI 2023 和 ICCV 2023 信息；删除上游数据集逐包运行教程。
 
-- [ ] **Step 3: 运行新结构和禁止措辞检查**
+- [x] **Step 3: 运行新结构和禁止措辞检查**
 
 Run:
 
@@ -110,7 +110,7 @@ rg -n "面试|速记|方便复习" README.md
 
 Expected: 第一条列出标题和 11 个一级章节；第二条无匹配。
 
-- [ ] **Step 4: 验证关键技术链路和接口仍完整**
+- [x] **Step 4: 验证关键技术链路和接口仍完整**
 
 Run:
 
@@ -133,7 +133,7 @@ foreach ($item in $required) {
 
 Expected: 命令成功退出，无缺失项。
 
-- [ ] **Step 5: 验证 README 引用的仓库文件与代码契约**
+- [x] **Step 5: 验证 README 引用的仓库文件与代码契约**
 
 Run:
 
@@ -158,7 +158,9 @@ rg -n '"/localization/state"|"/localization/valid"|"/map_scan"|"/map_path"|"/LIO
 
 Expected: 全部文件存在，参数和话题在配置或源码中有匹配。
 
-- [ ] **Step 6: 检查 Markdown 完整性和项目测试**
+- [x] **Step 6: 检查 Markdown 完整性和项目测试**
+
+> 执行记录：Windows 已运行文档合同、Python 套件与 `git diff --check`；Ubuntu C++ 构建/gtest、ROS 节点和 rosbag 集成未在 Windows 执行。
 
 Run:
 
@@ -172,7 +174,7 @@ py -3.12 -m unittest discover -s VoxelSLAM/test -p "*_test.py"
 
 Expected: 代码围栏成对，`git diff --check` 成功，20 项 Python 合同/评估测试通过。
 
-- [ ] **Step 7: 提交 README 重构**
+- [x] **Step 7: 提交 README 重构**
 
 ```powershell
 git add README.md
@@ -186,15 +188,16 @@ git commit -m "docs: restructure README around mapping and localization"
 - Modify: `VoxelSLAM/test/direct_pose_initializer_test.cpp`
 - Modify: `VoxelSLAM/src/localization_state.cpp`
 - Modify: `README.md`
+- Modify: `VoxelSLAM/README.md`
 - Modify: `docs/superpowers/plans/2026-10-08-readme-project-restructure.md`
 
 **Interfaces:**
 - Consumes: RViz 默认 `camera_init` Fixed Frame、`InitialPoseRequestBuffer::submit()`、SCAN-Planner `cloud_is_world`/`need_extrinsic` 语义。
 - Produces: 默认 RViz 2D Pose Estimate 可被接受的 frame 契约，以及不混淆世界系点云与 LiDAR 外参的导航接入说明。
 
-- [ ] **Step 1: 添加会失败的 RViz frame 回归测试**
+- [x] **Step 1: 添加会失败的 RViz frame 回归测试**
 
-在 `direct_pose_initializer_test.cpp` 中要求 `camera_init` 和 `/camera_init` 被接受，并保留 `map`、`/map` 兼容测试与其他 frame 拒绝测试。新增 Windows 可运行的 Python 合同测试，检查默认 RViz Fixed Frame、四个允许 frame、README 默认 frame 说明和 SCAN-Planner 两个独立开关。
+在 `direct_pose_initializer_test.cpp` 中要求 `camera_init` 和 `/camera_init` 被接受，并保留 `map`、`/map` 兼容测试与其他 frame 拒绝测试。新增 Windows 可运行的 Python 静态结构/语义合同测试，检查默认 RViz Fixed Frame、完整 frame 拒绝谓词、根 README 的默认 frame 说明和两份 README 的 SCAN-Planner 两个独立开关。该 Python 测试不执行 C++；真实行为由 Ubuntu 上的 C++ gtest 验证。
 
 Run:
 
@@ -204,11 +207,11 @@ py -3.12 -m unittest VoxelSLAM/test/localization_initialpose_contract_test.py
 
 Expected: FAIL，因为生产代码尚未接受 `camera_init`，README 仍错误设置 `need_extrinsic=false`。
 
-- [ ] **Step 2: 最小修复初始位姿 frame 契约**
+- [x] **Step 2: 最小修复初始位姿 frame 契约**
 
 修改 `InitialPoseRequestBuffer::submit()`，接受 `camera_init`、`/camera_init`、`map`、`/map`，继续拒绝其他 frame，并把错误信息改为明确列出允许的地图 frame。
 
-- [ ] **Step 3: 修正 README 接口说明**
+- [x] **Step 3: 修正 README 接口说明**
 
 - 明确默认 RViz Fixed Frame 是 `camera_init`，无需额外 `map -> camera_init` TF；`map` 是兼容别名。
 - SCAN-Planner 使用 `/map_scan` 时保持 `cloud_is_world=true`；使用 `/LIO/odom_imu` 作为射线原点位姿时保持 `need_extrinsic=true`，并要求 LiDAR→IMU 外参与 Voxel-SLAM 配置一致。
@@ -216,7 +219,9 @@ Expected: FAIL，因为生产代码尚未接受 `camera_init`，README 仍错误
 - 依赖列表加入 Boost filesystem/system 和 `rosdep install` 建议。
 - 删除所有把 `cloud_is_world=true` 推导为 `need_extrinsic=false` 的说明。
 
-- [ ] **Step 4: 验证回归测试与完整套件**
+- [x] **Step 4: 验证回归测试与完整套件**
+
+> 执行记录：Windows 上新 Python 静态结构/语义合同测试 8 项与完整 Python 套件 28 项通过，`git diff --check` 通过；该 Python 测试没有执行 C++。C++ gtest 已保留真实行为期望，仍待 Ubuntu/ROS 环境执行，rosbag 集成也尚未执行。
 
 Run:
 
@@ -226,13 +231,13 @@ py -3.12 -m unittest discover -s VoxelSLAM/test -p "*_test.py"
 git diff --check
 ```
 
-Expected: 新合同测试和完整 Python 套件通过；C++ gtest 已覆盖行为，但需在 Ubuntu/ROS 环境运行。
+Expected: 新静态结构/语义合同测试和完整 Python 套件通过；C++ gtest 已覆盖真实行为，但仍需在 Ubuntu/ROS 环境运行。
 
-- [ ] **Step 5: 更新计划状态并提交**
+- [x] **Step 5: 更新计划状态并提交**
 
 把 Task 1 和 Task 2 已执行步骤改为 `[x]`，同时在验证步骤注明 Ubuntu C++/ROS/rosbag 集成尚未在 Windows 执行。
 
 ```powershell
-git add README.md VoxelSLAM/src/localization_state.cpp VoxelSLAM/test/direct_pose_initializer_test.cpp VoxelSLAM/test/localization_initialpose_contract_test.py docs/superpowers/plans/2026-10-08-readme-project-restructure.md
+git add README.md VoxelSLAM/README.md VoxelSLAM/src/localization_state.cpp VoxelSLAM/test/direct_pose_initializer_test.cpp VoxelSLAM/test/localization_initialpose_contract_test.py docs/superpowers/plans/2026-10-08-readme-project-restructure.md
 git commit -m "fix: align RViz initialization and navigation docs"
 ```

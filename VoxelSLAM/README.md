@@ -37,16 +37,20 @@ camera_init -> aft_mapped -> base_link
 
 ## ROS1 SCAN-Planner 参数
 
+[SCAN-Planner](https://github.com/wuyi2121/SCAN-Planner) 是外部工程，不随本仓库 vendored。可以放入同一个 catkin 工作空间一起编译，也可以单独编译后依次 source Voxel-SLAM 与 SCAN-Planner overlay；完整接入和 launch 裁剪流程见仓库根目录 `README.md`。
+
 ```text
 body_pose_topic=/LIO/odom_vehicle
 sensor_pose_topic=/LIO/odom_imu
 cloud_topic=/map_scan
 grid_map/frame_id=camera_init
 grid_map/cloud_is_world=true
-grid_map/need_extrinsic=false
+grid_map/need_extrinsic=true
 ```
 
-`/map_scan` 已经在世界/地图坐标系中，因此必须设置 `cloud_is_world=true`，也不需要 SCAN-Planner 再应用一遍雷达外参。原版 ROS1 SCAN-Planner 的实机 `run.launch` 默认把点云固定为 `/LIO/clouds_lidar`、`cloud_is_world=false`，并把 `need_extrinsic` 设置为 `is_real_world`；接入本工程时必须修改这三项或复制自定义 launch，不能直接使用原默认值。
+`cloud_is_world` 与 `need_extrinsic` 语义独立：`/map_scan` 已在世界系，因此保持 `cloud_is_world=true`；`sensor_pose_topic=/LIO/odom_imu` 提供的是 IMU 位姿，因此保持 `need_extrinsic=true`，由 LiDAR→IMU 外参得到射线原点。默认 Mid-360 平移为 `[-0.011, -0.02329, 0.04412]`、旋转为单位旋转，必须与 `config/localization_mid360.yaml` 中的 `General/extrinsic_tran` 和 `General/extrinsic_rota` 一致。
+
+上游 `run.launch` 会无条件设置 Go2 `robot_description` 并启动 `go2_robot_state_publisher`。使用自有 URDF 时应复制并裁剪该 launch，避免重复启动 `robot_state_publisher`、覆盖机器人描述或发布冲突 TF。
 
 ## Ubuntu 编译与验证
 

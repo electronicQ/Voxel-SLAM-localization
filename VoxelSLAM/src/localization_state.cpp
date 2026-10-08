@@ -33,8 +33,13 @@ bool InitialPoseRequestBuffer::submit(
     double yaw, std::uint64_t &generation, std::string &error) {
   error.clear();
   generation = 0;
-  if (frame_id != "map" && frame_id != "/map") {
-    return fail(error, "RViz initial pose must use the map frame");
+  // map aliases are same-coordinate compatibility aliases for camera_init;
+  // no TF transform occurs here.
+  if (frame_id != "camera_init" && frame_id != "/camera_init" &&
+      frame_id != "map" && frame_id != "/map") {
+    return fail(error,
+                "RViz initial pose allowed map frames: camera_init, "
+                "/camera_init, map, /map");
   }
   if (!std::isfinite(stamp_sec) || !xy.array().isFinite().all() ||
       !std::isfinite(yaw)) {

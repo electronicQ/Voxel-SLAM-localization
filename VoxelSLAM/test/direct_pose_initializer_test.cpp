@@ -90,37 +90,48 @@ TEST(DirectPoseInitializer, RejectsMissingImuAndInvalidInputsAtomically) {
   EXPECT_EQ(result.height_keyframe_id, 99);
 }
 
-TEST(DirectPoseInitializer, ReplacesRequestsAndRejectsNonMapFrames) {
+TEST(DirectPoseInitializer, AcceptsMapFramesAndReplacesRequests) {
   InitialPoseRequestBuffer buffer;
   std::string error;
   std::uint64_t first = 0;
   std::uint64_t second = 0;
+  std::uint64_t third = 0;
+  std::uint64_t fourth = 0;
 
   EXPECT_FALSE(buffer.submit("odom", 1.0, Eigen::Vector2d(1.0, 2.0),
                              0.3, first, error));
+  EXPECT_NE(error.find("camera_init"), std::string::npos) << error;
+  EXPECT_NE(error.find("/camera_init"), std::string::npos) << error;
   EXPECT_NE(error.find("map"), std::string::npos) << error;
+  EXPECT_NE(error.find("/map"), std::string::npos) << error;
   EXPECT_FALSE(buffer.snapshot().valid);
 
-  ASSERT_TRUE(buffer.submit("map", 2.0, Eigen::Vector2d(3.0, 4.0),
+  ASSERT_TRUE(buffer.submit("camera_init", 2.0, Eigen::Vector2d(3.0, 4.0),
                             0.5, first, error)) << error;
-  ASSERT_TRUE(buffer.submit("/map", 3.0, Eigen::Vector2d(5.0, 6.0),
+  ASSERT_TRUE(buffer.submit("/camera_init", 3.0, Eigen::Vector2d(5.0, 6.0),
                             0.7, second, error)) << error;
+  ASSERT_TRUE(buffer.submit("map", 4.0, Eigen::Vector2d(7.0, 8.0),
+                            0.9, third, error)) << error;
+  ASSERT_TRUE(buffer.submit("/map", 5.0, Eigen::Vector2d(9.0, 10.0),
+                            1.1, fourth, error)) << error;
   EXPECT_GT(second, first);
+  EXPECT_GT(third, second);
+  EXPECT_GT(fourth, third);
   EXPECT_FALSE(buffer.is_current(first));
-  EXPECT_TRUE(buffer.is_current(second));
+  EXPECT_TRUE(buffer.is_current(fourth));
   bool stale_action_ran = false;
   EXPECT_FALSE(buffer.run_if_current(first,
                                      [&]() { stale_action_ran = true; }));
   EXPECT_FALSE(stale_action_ran);
   bool current_action_ran = false;
-  EXPECT_TRUE(buffer.run_if_current(second,
+  EXPECT_TRUE(buffer.run_if_current(fourth,
                                     [&]() { current_action_ran = true; }));
   EXPECT_TRUE(current_action_ran);
   const PendingInitialPose pending = buffer.snapshot();
   EXPECT_TRUE(pending.valid);
-  EXPECT_EQ(pending.generation, second);
-  EXPECT_TRUE(pending.xy.isApprox(Eigen::Vector2d(5.0, 6.0)));
-  EXPECT_DOUBLE_EQ(pending.yaw, 0.7);
+  EXPECT_EQ(pending.generation, fourth);
+  EXPECT_TRUE(pending.xy.isApprox(Eigen::Vector2d(9.0, 10.0)));
+  EXPECT_DOUBLE_EQ(pending.yaw, 1.1);
 }
 
 }  // namespace
