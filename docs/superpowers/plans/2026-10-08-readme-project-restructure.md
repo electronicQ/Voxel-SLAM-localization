@@ -178,3 +178,61 @@ Expected: 代码围栏成对，`git diff --check` 成功，20 项 Python 合同/
 git add README.md
 git commit -m "docs: restructure README around mapping and localization"
 ```
+
+### Task 2: 修正 RViz frame 契约与导航接入说明
+
+**Files:**
+- Create: `VoxelSLAM/test/localization_initialpose_contract_test.py`
+- Modify: `VoxelSLAM/test/direct_pose_initializer_test.cpp`
+- Modify: `VoxelSLAM/src/localization_state.cpp`
+- Modify: `README.md`
+- Modify: `docs/superpowers/plans/2026-10-08-readme-project-restructure.md`
+
+**Interfaces:**
+- Consumes: RViz 默认 `camera_init` Fixed Frame、`InitialPoseRequestBuffer::submit()`、SCAN-Planner `cloud_is_world`/`need_extrinsic` 语义。
+- Produces: 默认 RViz 2D Pose Estimate 可被接受的 frame 契约，以及不混淆世界系点云与 LiDAR 外参的导航接入说明。
+
+- [ ] **Step 1: 添加会失败的 RViz frame 回归测试**
+
+在 `direct_pose_initializer_test.cpp` 中要求 `camera_init` 和 `/camera_init` 被接受，并保留 `map`、`/map` 兼容测试与其他 frame 拒绝测试。新增 Windows 可运行的 Python 合同测试，检查默认 RViz Fixed Frame、四个允许 frame、README 默认 frame 说明和 SCAN-Planner 两个独立开关。
+
+Run:
+
+```powershell
+py -3.12 -m unittest VoxelSLAM/test/localization_initialpose_contract_test.py
+```
+
+Expected: FAIL，因为生产代码尚未接受 `camera_init`，README 仍错误设置 `need_extrinsic=false`。
+
+- [ ] **Step 2: 最小修复初始位姿 frame 契约**
+
+修改 `InitialPoseRequestBuffer::submit()`，接受 `camera_init`、`/camera_init`、`map`、`/map`，继续拒绝其他 frame，并把错误信息改为明确列出允许的地图 frame。
+
+- [ ] **Step 3: 修正 README 接口说明**
+
+- 明确默认 RViz Fixed Frame 是 `camera_init`，无需额外 `map -> camera_init` TF；`map` 是兼容别名。
+- SCAN-Planner 使用 `/map_scan` 时保持 `cloud_is_world=true`；使用 `/LIO/odom_imu` 作为射线原点位姿时保持 `need_extrinsic=true`，并要求 LiDAR→IMU 外参与 Voxel-SLAM 配置一致。
+- 说明 SCAN-Planner 同工作空间/overlay source 方法，链接外部仓库，并提醒裁剪其 Go2 `robot_description`/`robot_state_publisher` 后再与用户 URDF 配合。
+- 依赖列表加入 Boost filesystem/system 和 `rosdep install` 建议。
+- 删除所有把 `cloud_is_world=true` 推导为 `need_extrinsic=false` 的说明。
+
+- [ ] **Step 4: 验证回归测试与完整套件**
+
+Run:
+
+```powershell
+py -3.12 -m unittest VoxelSLAM/test/localization_initialpose_contract_test.py
+py -3.12 -m unittest discover -s VoxelSLAM/test -p "*_test.py"
+git diff --check
+```
+
+Expected: 新合同测试和完整 Python 套件通过；C++ gtest 已覆盖行为，但需在 Ubuntu/ROS 环境运行。
+
+- [ ] **Step 5: 更新计划状态并提交**
+
+把 Task 1 和 Task 2 已执行步骤改为 `[x]`，同时在验证步骤注明 Ubuntu C++/ROS/rosbag 集成尚未在 Windows 执行。
+
+```powershell
+git add README.md VoxelSLAM/src/localization_state.cpp VoxelSLAM/test/direct_pose_initializer_test.cpp VoxelSLAM/test/localization_initialpose_contract_test.py docs/superpowers/plans/2026-10-08-readme-project-restructure.md
+git commit -m "fix: align RViz initialization and navigation docs"
+```

@@ -113,3 +113,12 @@
 7. 上游论文、仓库、视频和竞赛信息仍可在文末找到。
 8. README 中引用的本地文件、launch、配置、可执行程序、话题和参数名称均能在仓库中找到或由当前配置定义。
 9. Markdown 标题层级、代码块和相对链接通过人工与脚本检查，无空章节、占位符或明显重复段落。
+
+## 最终审查后的接口修正
+
+最终整体审查发现，文档中的两个运行接口必须先与实际程序行为统一：
+
+1. 仓库提供的 RViz 配置使用 `camera_init` 作为 Fixed Frame，而初始位姿缓冲区原先只接受 `map`/`/map`。由于本工程将 `camera_init` 作为历史地图世界坐标系和定位输出父坐标系，程序应同时接受 `camera_init`、`/camera_init`、`map` 和 `/map`；README 应以默认 `camera_init` 流程为主，并将 `map` 说明为兼容别名。
+2. SCAN-Planner 的 `cloud_is_world` 只决定输入点云是否需要再变换；`need_extrinsic` 独立决定输入的 IMU 位姿是否需要转换到 LiDAR 射线原点。当前接入使用 `/LIO/odom_imu` 作为传感器位姿且 Mid-360 外参非零，因此应设置 `cloud_is_world=true`、`need_extrinsic=true`，并确保 SCAN-Planner 的 LiDAR 外参与 `General/extrinsic_tran`/`extrinsic_rota` 一致。
+
+README 还必须说明：SCAN-Planner 是外部工程，应放入同一 catkin 工作空间或正确 source overlay；其上游 `run.launch` 会设置 Go2 `robot_description` 并启动 `robot_state_publisher`，使用用户自有 URDF 时必须复制并裁剪该 launch，避免重复覆盖机器人描述和 TF。环境依赖补充 Boost filesystem/system，并建议使用 `rosdep install`。这些修正不改变既有 BTC、RViz 验证、连续定位或高频里程计算法流程。
