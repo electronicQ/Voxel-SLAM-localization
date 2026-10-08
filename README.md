@@ -50,6 +50,8 @@ Windows 环境只能执行文档契约、Git 差异和不依赖 ROS/PCL/GTSAM �
 
 以下流程以 Livox Mid-360 为例。输入话题默认来自 `VoxelSLAM/config/mid360.yaml` 和 `VoxelSLAM/config/localization_mid360.yaml` 中的 `/livox/lidar`、`/livox/imu`；实际传感器或 rosbag 必须与配置一致。
 
+**多终端环境说明：** 以下每个新终端都应先执行 `source ~/catkin_ws/devel/setup.bash`；若已写入 `~/.bashrc`，可省略该步骤。本说明覆盖后续建图、定位和导航接入中的全部终端。
+
 ### 4.1 建图配置
 
 编辑 `VoxelSLAM/config/mid360.yaml`：
