@@ -2,7 +2,7 @@
 
 ## 1. 项目简介
 
-本项目是在 [Voxel-SLAM](https://github.com/hku-mars/Voxel-SLAM) 基础上完成的建图与定位二次开发。工程保留原版的 LiDAR-IMU 前端、点到面迭代误差状态卡尔曼滤波（IESKF）、滑动窗口局部 BA、BTC 回环描述子和 GTSAM 优化能力，并将工作重点扩展到可复用地图上的重定位、连续定位及导航接入。
+本项目是在 Voxel-SLAM 基础上完成的建图与定位二次开发。工程保留原版的 LiDAR-IMU 前端、点到面迭代误差状态卡尔曼滤波（IESKF）、滑动窗口局部 BA、BTC 回环描述子和 GTSAM 优化能力，并将工作重点扩展到可复用地图上的重定位、连续定位及导航接入。
 
 当前改造边界包括：
 
@@ -74,12 +74,19 @@ MapBlock:
 
 ### 4.2 运行建图并导出 v2 地图
 
+终端 1 启动建图节点，并保持该前台进程运行：
+
 ```bash
 roslaunch voxel_slam vxlm_mid360.launch
+```
+
+终端 2 播放建图数据：
+
+```bash
 rosbag play mapping.bag --pause
 ```
 
-rosbag 播放结束后触发最终全局优化和地图导出：
+`--pause` 会让 rosbag 启动后保持暂停。确认终端 1 中的节点已就绪，再回到终端 2 按空格键解除暂停。rosbag 播放结束后保持终端 1 的建图节点运行，并从另一终端 3 触发最终全局优化和地图导出：
 
 ```bash
 rosparam set finish true
@@ -106,11 +113,20 @@ rosrun voxel_slam build_spatial_map \
 
 可以在 `VoxelSLAM/config/localization_mid360.yaml` 中设置 `Localization/map_path`，也可以由 launch 参数覆盖：
 
+终端 1 启动定位节点，并保持该前台进程运行：
+
 ```bash
 roslaunch voxel_slam vxlm_localization_mid360.launch \
   map_path:=/absolute/path/to/v2_map
+```
+
+终端 2 播放定位数据：
+
+```bash
 rosbag play localization.bag --pause
 ```
+
+确认终端 1 中的定位节点已就绪后，在终端 2 按空格键解除暂停。
 
 launch 会加载定位配置，强制 `General/mode=localization`，并保持 `General/map_export_path` 为空。地图清单、关键帧、BTC 数据库和空间块索引全部通过后，状态机进入 `LOCAL_ODOMETRY`。
 
@@ -138,20 +154,30 @@ rostopic echo /localization/valid
 
 ### 4.7 接入 SCAN-Planner（可选）
 
-先由机器人描述提供静态 `aft_mapped -> base_link` 外参，再依次启动定位和适配器：
+先由机器人描述提供静态 `aft_mapped -> base_link` 外参。以下四个前台进程分别在终端 1/2/3/4 中启动并保持运行；不要等待前一个 `roslaunch` 退出后再执行下一个。
+
+终端 1 启动用户工程的机器人描述：
 
 ```bash
-# 1. 用户工程提供 aft_mapped -> base_link
 roslaunch your_robot_description robot_description.launch
+```
 
-# 2. 启动 Voxel-SLAM 定位
+终端 2 启动 Voxel-SLAM 定位：
+
+```bash
 roslaunch voxel_slam vxlm_localization_mid360.launch \
   map_path:=/absolute/path/to/v2_map
+```
 
-# 3. 启动车体里程计适配器
+终端 3 启动车体里程计适配器：
+
+```bash
 roslaunch voxel_slam scan_planner_adapter.launch
+```
 
-# 4. 修改 SCAN-Planner 接口后启动
+终端 4 在完成下述接口修改后启动 SCAN-Planner：
+
+```bash
 roslaunch scan_planner run.launch is_real_world:=true sensor_type:=lidar
 ```
 
@@ -410,6 +436,7 @@ python3 -m unittest discover -s src/Voxel-SLAM/VoxelSLAM/test -p "*_test.py"
 定位轨迹与运行期地图一致性评估：
 
 ```bash
+cd ~/catkin_ws/src/Voxel-SLAM
 python3 VoxelSLAM/scripts/evaluate_localization.py \
   --estimate estimate.tum \
   --reference reference.tum \
