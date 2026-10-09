@@ -1,4 +1,4 @@
-# Voxel-SLAM：建图、重定位与连续定位系统
+# Voxel-SLAM-localization：建图、重定位与连续定位系统
 
 ## 1. 项目简介
 
