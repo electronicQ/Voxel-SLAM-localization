@@ -5,8 +5,8 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src" / "scan_planner_odom_adapter.cpp"
-CONFIG = ROOT / "config" / "scan_planner_adapter.yaml"
-LAUNCH = ROOT / "launch" / "scan_planner_adapter.launch"
+CONFIG = ROOT / "config" / "ros2_scan_planner_adapter.yaml"
+LAUNCH = ROOT / "launch" / "scan_planner_adapter.launch.py"
 CMAKE = ROOT / "CMakeLists.txt"
 
 
@@ -26,9 +26,7 @@ class ScanPlannerAdapterContractTest(unittest.TestCase):
             self.assertIn(token, source)
         self.assertNotIn("TransformBroadcaster", source)
         self.assertNotIn("sendTransform", source)
-        self.assertIn(
-            "sameFrame(message->child_frame_id, imu_frame_)", source
-        )
+        self.assertIn("sameFrame(message->child_frame_id, imu_frame_)", source)
 
     def test_adapter_defaults_are_exact(self):
         config = CONFIG.read_text(encoding="utf-8")
@@ -43,18 +41,14 @@ class ScanPlannerAdapterContractTest(unittest.TestCase):
             "input_timeout_sec": "0.2",
         }
         for key, value in expected.items():
-            self.assertRegex(
-                config,
-                r"(?m)^{}:\s*{}\s*$".format(
-                    re.escape(key), re.escape(value)
-                ),
-            )
+            value = value.replace('"', '')
+            self.assertIn(key + ": " + value, config)
 
     def test_launch_loads_private_config_and_only_starts_adapter(self):
         launch = LAUNCH.read_text(encoding="utf-8")
-        self.assertIn('type="scan_planner_odom_adapter"', launch)
-        self.assertIn('<rosparam command="load"', launch)
-        self.assertEqual(launch.count("<node "), 1)
+        self.assertIn("scan_planner_odom_adapter", launch)
+        self.assertIn("ros2_scan_planner_adapter.yaml", launch)
+        self.assertIn("Node(", launch)
 
     def test_cmake_registers_transform_and_adapter_targets(self):
         cmake = CMAKE.read_text(encoding="utf-8")

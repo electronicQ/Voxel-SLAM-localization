@@ -4,7 +4,17 @@
 #include <ros/ros.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <sensor_msgs/PointCloud2.h>
-#include <livox_ros_driver/CustomMsg.h>
+#if __has_include(<livox_ros_driver2/msg/custom_msg.hpp>)
+#include <livox_ros_driver2/msg/custom_msg.hpp>
+#define VOXEL_SLAM_HAS_LIVOX 1
+using LivoxCustomMsg = livox_ros_driver2::msg::CustomMsg;
+#elif __has_include(<livox_ros_driver/msg/custom_msg.hpp>)
+#include <livox_ros_driver/msg/custom_msg.hpp>
+#define VOXEL_SLAM_HAS_LIVOX 1
+using LivoxCustomMsg = livox_ros_driver::msg::CustomMsg;
+#else
+#define VOXEL_SLAM_HAS_LIVOX 0
+#endif
 
 typedef pcl::PointXYZINormal PointType;
 using namespace std;
@@ -100,17 +110,22 @@ public:
   double blind = 1;
   double omega_l = 3610;
 
-  double process(const livox_ros_driver::CustomMsg::ConstPtr &msg, pcl::PointCloud<PointType> &pl_full)
+  #if VOXEL_SLAM_HAS_LIVOX
+  double process(const LivoxCustomMsg::ConstSharedPtr &msg, pcl::PointCloud<PointType> &pl_full)
   {
     livox_handler(msg, pl_full);
-    return msg->header.stamp.toSec();
+    return rclcpp::Time(msg->header.stamp).seconds();
   }
+  #endif
 
-  double process(const sensor_msgs::PointCloud2::ConstPtr &msg, pcl::PointCloud<PointType> &pl_full)
+  double process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, pcl::PointCloud<PointType> &pl_full)
   {
-    double t0 = msg->header.stamp.toSec();
+    double t0 = rclcpp::Time(msg->header.stamp).seconds();
     switch(lidar_type)
     {
+    case LIVOX:
+      generic_pointcloud_handler(msg, pl_full);
+      break;
     case VELODYNE:
       velodyne_handler(msg, pl_full);
       break;
@@ -139,7 +154,28 @@ public:
     return t0;
   }
 
-  void livox_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg, pcl::PointCloud<PointType> &pl_full)
+  void generic_pointcloud_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg,
+                                  pcl::PointCloud<PointType> &pl_full)
+  {
+    pcl::PointCloud<pcl::PointXYZI> input;
+    pcl::fromROSMsg(*msg, input);
+    pl_full.reserve(input.size());
+    for (std::size_t index = 0; index < input.size(); ++index) {
+      if (index % point_filter_num != 0) continue;
+      const auto &source = input.points[index];
+      if (source.x * source.x + source.y * source.y + source.z * source.z <= blind) continue;
+      PointType point;
+      point.x = source.x;
+      point.y = source.y;
+      point.z = source.z;
+      point.intensity = source.intensity;
+      point.curvature = 0.0f;
+      pl_full.push_back(point);
+    }
+  }
+
+  #if VOXEL_SLAM_HAS_LIVOX
+  void livox_handler(const LivoxCustomMsg::ConstSharedPtr &msg, pcl::PointCloud<PointType> &pl_full)
   { 
     int plsize = msg->point_num;
     pl_full.reserve(plsize);
@@ -165,8 +201,9 @@ public:
     }
 
   }
+  #endif
 
-  void velodyne_handler(const sensor_msgs::PointCloud2::ConstPtr &msg, pcl::PointCloud<PointType> &pl_full)
+  void velodyne_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, pcl::PointCloud<PointType> &pl_full)
   {
     pcl::PointCloud<velodyne_ros::Point> pl_orig;
     pcl::fromROSMsg(*msg, pl_orig);
@@ -253,7 +290,7 @@ public:
 
   }
 
-  void ouster_handler(const sensor_msgs::PointCloud2::ConstPtr &msg, pcl::PointCloud<PointType> &pl_full)
+  void ouster_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, pcl::PointCloud<PointType> &pl_full)
   {
     pcl::PointCloud<ouster_ros::Point> pl_orig;
     pcl::fromROSMsg(*msg, pl_orig);
@@ -282,7 +319,7 @@ public:
 
   }
 
-  void hesai_handler(const sensor_msgs::PointCloud2::ConstPtr &msg, pcl::PointCloud<PointType> &pl_full)
+  void hesai_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, pcl::PointCloud<PointType> &pl_full)
   { 
     pcl::PointCloud<xt32_ros::Point> pl_orig;
     pcl::fromROSMsg(*msg, pl_orig);
@@ -316,7 +353,7 @@ public:
 
   }
 
-  double robosense_handler(const sensor_msgs::PointCloud2::ConstPtr &msg, pcl::PointCloud<PointType> &pl_full)
+  double robosense_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, pcl::PointCloud<PointType> &pl_full)
   {
     pcl::PointCloud<rslidar_ros::Point> pl_orig;
     pcl::fromROSMsg(*msg, pl_orig);
@@ -347,7 +384,7 @@ public:
     return t0;
   }
 
-  void tartanair_handler(const sensor_msgs::PointCloud2::ConstPtr &msg, pcl::PointCloud<PointType> &pl_full)
+  void tartanair_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, pcl::PointCloud<PointType> &pl_full)
   {
     pcl::PointCloud<pcl::PointXYZ> pl_orig;
     pcl::fromROSMsg(*msg, pl_orig);

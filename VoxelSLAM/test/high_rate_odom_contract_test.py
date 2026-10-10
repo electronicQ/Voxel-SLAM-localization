@@ -6,6 +6,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CPP_PATH = ROOT / "src" / "voxelslam.cpp"
 HPP_PATH = ROOT / "src" / "voxelslam.hpp"
+COMPAT_PATH = ROOT / "include" / "ros" / "ros.h"
 CONFIG_DIRECTORY = ROOT / "config"
 
 
@@ -47,20 +48,17 @@ class HighRateOdometryContractTest(unittest.TestCase):
     def setUpClass(cls):
         cls.cpp = CPP_PATH.read_text(encoding="utf-8")
         cls.hpp = HPP_PATH.read_text(encoding="utf-8")
-        cls.source = cls.hpp + "\n" + cls.cpp
+        cls.compat = COMPAT_PATH.read_text(encoding="utf-8")
+        cls.source = cls.compat + "\n" + cls.hpp + "\n" + cls.cpp
 
     def test_imu_subscription_uses_dedicated_single_thread_queue(self):
-        self.assertIn("ros::CallbackQueue imu_callback_queue", self.source)
-        self.assertRegex(
-            self.source,
-            r"ros::AsyncSpinner\s*\(\s*1\s*,\s*&imu_callback_queue\s*\)",
-        )
-        self.assertIn("ros::SubscribeOptions", self.cpp)
+        self.assertIn("rclcpp", self.source)
+        self.assertIn("n.subscribe<sensor_msgs::msg::Imu>", self.cpp)
+        self.assertIn("imu_callback", self.cpp)
         self.assertIn("&imu_callback_queue", self.cpp)
+        self.assertIn("SingleThreadedExecutor", self.source)
+        self.assertNotIn("ros::SubscribeOptions", self.cpp)
         self.assertNotRegex(self.source, r"\bvoid\s+imu_handler\s*\(")
-        self.assertNotIn(
-            "n.subscribe(imu_topic, 80000, imu_handler)", self.cpp
-        )
 
     def test_member_callback_buffers_before_predicting_and_handles_rollback(self):
         body = function_body(self.cpp, "void imu_callback(")

@@ -12,8 +12,6 @@
 
 #include <geometry_msgs/PoseWithCovarianceStamped.h>
 #include <nav_msgs/Odometry.h>
-#include <ros/callback_queue.h>
-#include <ros/spinner.h>
 #include <std_msgs/Bool.h>
 #include <std_msgs/String.h>
 
@@ -562,7 +560,7 @@ public:
 
   }
 
-  void motion_blur(pcl::PointCloud<PointType> &pl, PVec &pvec, IMUST xc, IMUST xl, deque<sensor_msgs::Imu::Ptr> &imus, double pcl_beg_time, IMUST &extrin_para)
+  void motion_blur(pcl::PointCloud<PointType> &pl, PVec &pvec, IMUST xc, IMUST xl, deque<sensor_msgs::msg::Imu::SharedPtr> &imus, double pcl_beg_time, IMUST &extrin_para)
   {
     xc.bg = xl.bg; xc.ba = xl.ba;
     Eigen::Vector3d acc_imu, angvel_avr, acc_avr, vel_imu(xc.v), pos_imu(xc.p);
@@ -571,8 +569,8 @@ public:
 
     for(auto it_imu=imus.end()-1; it_imu!=imus.begin(); it_imu--)
     {
-      sensor_msgs::Imu &head = **(it_imu-1);
-      sensor_msgs::Imu &tail = **(it_imu); 
+      sensor_msgs::msg::Imu &head = **(it_imu-1);
+      sensor_msgs::msg::Imu &tail = **(it_imu);
       
       angvel_avr << 0.5*(head.angular_velocity.x + tail.angular_velocity.x), 
                     0.5*(head.angular_velocity.y + tail.angular_velocity.y), 
@@ -584,7 +582,8 @@ public:
       angvel_avr -= xc.bg;
       acc_avr = acc_avr * imupre_scale_gravity - xc.ba;
 
-      double dt = head.header.stamp.toSec() - tail.header.stamp.toSec();
+      double dt = rclcpp::Time(head.header.stamp).seconds() -
+                  rclcpp::Time(tail.header.stamp).seconds();
       Eigen::Matrix3d acc_avr_skew = hat(acc_avr);
       Eigen::Matrix3d Exp_f = Exp(angvel_avr, dt);
 
@@ -593,7 +592,7 @@ public:
       vel_imu = vel_imu + acc_imu * dt;
       R_imu = R_imu * Exp_f;
 
-      double offt = head.header.stamp.toSec() - pcl_beg_time;
+      double offt = rclcpp::Time(head.header.stamp).seconds() - pcl_beg_time;
       imu_poses.emplace_back(offt, R_imu, pos_imu, vel_imu, angvel_avr, acc_imu);
     }
 
@@ -637,7 +636,7 @@ public:
     }
   }
 
-  int motion_init(vector<pcl::PointCloud<PointType>::Ptr> &pl_origs, vector<deque<sensor_msgs::Imu::Ptr>> &vec_imus, vector<double> &beg_times, Eigen::MatrixXd *hess, LidarFactor &voxhess, vector<IMUST> &x_buf, unordered_map<VOXEL_LOC, OctoTree*> &surf_map, unordered_map<VOXEL_LOC, OctoTree*> &surf_map_slide, vector<PVecPtr> &pvec_buf, int win_size, vector<vector<SlideWindow*>> &sws, IMUST &x_curr, deque<IMU_PRE*> &imu_pre_buf, IMUST &extrin_para)
+  int motion_init(vector<pcl::PointCloud<PointType>::Ptr> &pl_origs, vector<deque<sensor_msgs::msg::Imu::SharedPtr>> &vec_imus, vector<double> &beg_times, Eigen::MatrixXd *hess, LidarFactor &voxhess, vector<IMUST> &x_buf, unordered_map<VOXEL_LOC, OctoTree*> &surf_map, unordered_map<VOXEL_LOC, OctoTree*> &surf_map_slide, vector<PVecPtr> &pvec_buf, int win_size, vector<vector<SlideWindow*>> &sws, IMUST &x_curr, deque<IMU_PRE*> &imu_pre_buf, IMUST &extrin_para)
   {
     PLV(3) pwld;
     double last_g_norm = x_buf[0].g.norm();
@@ -1033,12 +1032,28 @@ public:
       throw std::invalid_argument("invalid map block settings");
     }
 
-    if(feat.lidar_type == LIVOX)
-      sub_pcl = n.subscribe<livox_ros_driver::CustomMsg>(lid_topic, 1000, pcl_handler);
-    else
-      sub_pcl = n.subscribe<sensor_msgs::PointCloud2>(lid_topic, 1000, pcl_handler);
+    if(feat.lidar_type == LIVOX) {
+#if VOXEL_SLAM_HAS_LIVOX
+      sub_pcl = n.subscribe<LivoxCustomMsg>(
+          lid_topic, 1000,
+          [](LivoxCustomMsg::ConstSharedPtr message) { pcl_handler(message); });
+#else
+      ROS_WARN("Livox ROS2 driver is unavailable; treating the lidar input as PointCloud2.");
+      sub_pcl = n.subscribe<sensor_msgs::msg::PointCloud2>(
+          lid_topic, 1000,
+          [](sensor_msgs::msg::PointCloud2::ConstSharedPtr message) {
+            pcl_handler(message);
+          });
+#endif
+    } else {
+      sub_pcl = n.subscribe<sensor_msgs::msg::PointCloud2>(
+          lid_topic, 1000,
+          [](sensor_msgs::msg::PointCloud2::ConstSharedPtr message) {
+            pcl_handler(message);
+          });
+    }
     if(operation_mode == "localization" && rviz_initialpose_enabled)
-      sub_initialpose = n.subscribe(
+      sub_initialpose = n.subscribe<geometry_msgs::msg::PoseWithCovarianceStamped>(
           "/initialpose", 5, &VOXEL_SLAM::initialpose_callback, this);
     if(operation_mode == "localization")
     {
@@ -1136,12 +1151,11 @@ public:
     sws.resize(thread_num);
     cout << "bagname: " << bagname << endl;
 
-    ros::SubscribeOptions imu_options =
-        ros::SubscribeOptions::create<sensor_msgs::Imu>(
-            imu_topic, 80000,
-            boost::bind(&VOXEL_SLAM::imu_callback, this, _1),
-            ros::VoidPtr(), &imu_callback_queue);
-    sub_imu = n.subscribe(imu_options);
+    sub_imu = n.subscribe<sensor_msgs::msg::Imu>(
+        imu_topic, 80000,
+        [this](sensor_msgs::msg::Imu::ConstSharedPtr message) {
+          imu_callback(message);
+        }, &imu_callback_queue);
     imu_spinner.reset(new ros::AsyncSpinner(1, &imu_callback_queue));
     imu_spinner->start();
   }
@@ -1262,18 +1276,18 @@ public:
         transform, odometry.header.stamp, odom_frame, imu_child_frame));
   }
 
-  void imu_callback(const sensor_msgs::Imu::ConstPtr &msg_in)
+  void imu_callback(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in)
   {
     if(!msg_in) return;
     static int first_message = 1;
     if(first_message)
     {
       first_message = 0;
-      printf("Time0: %lf\n", msg_in->header.stamp.toSec());
+      printf("Time0: %lf\n", rclcpp::Time(msg_in->header.stamp).seconds());
     }
 
-    sensor_msgs::Imu::Ptr msg(new sensor_msgs::Imu(*msg_in));
-    const double timestamp = msg->header.stamp.toSec();
+    sensor_msgs::msg::Imu::SharedPtr msg(new sensor_msgs::msg::Imu(*msg_in));
+    const double timestamp = rclcpp::Time(msg->header.stamp).seconds();
     bool timestamp_rollback = false;
     {
       lock_guard<mutex> lock(mBuf);
@@ -1315,10 +1329,10 @@ public:
   }
 
   void initialpose_callback(
-      const geometry_msgs::PoseWithCovarianceStamped::ConstPtr &message)
+      const geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr &message)
   {
     if(!rviz_initialpose_enabled || !message) return;
-    const geometry_msgs::Quaternion &orientation =
+    const geometry_msgs::msg::Quaternion &orientation =
         message->pose.pose.orientation;
     Eigen::Quaterniond quaternion(orientation.w, orientation.x,
                                   orientation.y, orientation.z);
@@ -1336,7 +1350,7 @@ public:
     std::uint64_t generation = 0;
     string error;
     if(!initial_pose_requests.submit(message->header.frame_id,
-                                     message->header.stamp.toSec(), xy, yaw,
+                                     rclcpp::Time(message->header.stamp).seconds(), xy, yaw,
                                      generation, error))
     {
       ROS_WARN_STREAM("Rejected RViz initial pose: " << error);
@@ -2029,11 +2043,11 @@ public:
     
   }
 
-  int initialization(deque<sensor_msgs::Imu::Ptr> &imus, Eigen::MatrixXd &hess, LidarFactor &voxhess, PLV(3) &pwld, pcl::PointCloud<PointType>::Ptr pcl_curr)
+  int initialization(deque<sensor_msgs::msg::Imu::SharedPtr> &imus, Eigen::MatrixXd &hess, LidarFactor &voxhess, PLV(3) &pwld, pcl::PointCloud<PointType>::Ptr pcl_curr)
   {
     static vector<pcl::PointCloud<PointType>::Ptr> pl_origs;
     static vector<double> beg_times;
-    static vector<deque<sensor_msgs::Imu::Ptr>> vec_imus;
+    static vector<deque<sensor_msgs::msg::Imu::SharedPtr>> vec_imus;
 
     pcl::PointCloud<PointType>::Ptr orig(new pcl::PointCloud<PointType>(*pcl_curr));
     if(odom_ekf.process(x_curr, *pcl_curr, imus) == 0)
@@ -2089,7 +2103,7 @@ public:
     return 0;
   }
 
-  void system_reset(deque<sensor_msgs::Imu::Ptr> &imus)
+  void system_reset(deque<sensor_msgs::msg::Imu::SharedPtr> &imus)
   {
     reset_imu_rate_predictor();
     string epoch_error;
@@ -2277,7 +2291,7 @@ public:
     pl_tree.reset(new pcl::PointCloud<PointType>());
     vector<pcl::PointCloud<PointType>::Ptr> pl_origs;
     vector<double> beg_times;
-    vector<deque<sensor_msgs::Imu::Ptr>> vec_imus;
+    vector<deque<sensor_msgs::msg::Imu::SharedPtr>> vec_imus;
     bool release_flag = false;
     int degrade_cnt = 0;
     LidarFactor voxhess(win_size);
@@ -2300,7 +2314,7 @@ public:
         break;
       }
 
-      deque<sensor_msgs::Imu::Ptr> imus;
+      deque<sensor_msgs::msg::Imu::SharedPtr> imus;
       if(!sync_packages(pcl_curr, imus, odom_ekf))
       {
         if(octos_release.size() != 0)
@@ -4207,4 +4221,3 @@ int main(int argc, char **argv)
   thread_gba.join();
   ros::spin(); return 0;
 }
-

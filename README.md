@@ -1,5 +1,7 @@
 # Voxel-SLAM-localization：建图、重定位与连续定位系统
 
+ROS 2 Humble 迁移分支的构建、launch、rosbag2 和 RViz2 说明见 [`ROS2_HUMBLE.md`](ROS2_HUMBLE.md)。当前 `main` 分支仍是 ROS1 Noetic 版本。
+
 ## 1. 项目简介
 
 本项目是在 Voxel-SLAM 基础上完成的建图与定位二次开发。工程保留原版的 LiDAR-IMU 前端、点到面迭代误差状态卡尔曼滤波（IESKF）、滑动窗口局部 BA、BTC 回环描述子和 GTSAM 优化能力，并将工作重点扩展到可复用地图上的重定位、连续定位及导航接入。

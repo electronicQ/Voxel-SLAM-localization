@@ -1,0 +1,63 @@
+/**:
+  ros__parameters:
+    General:
+      mode: mapping
+      map_export_path: ''
+      lid_topic: /livox/lidar
+      imu_topic: /livox/imu
+      save_path: /tmp/voxel_slam/save_datas/
+      previous_map: ''
+      bagname: mid360_init
+      lidar_type: 0
+      blind: 0.5
+      point_filter_num: 3
+      extrinsic_tran: [-0.011, -0.02329, 0.04412]
+      extrinsic_rota: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+      is_save_map: 0
+    Odometry:
+      imu_rate_output: true
+      imu_odom_topic: /LIO/odom_imu
+      odom_frame: camera_init
+      imu_child_frame: aft_mapped
+      publish_before_localized: false
+      max_prediction_sec: 0.5
+      cov_gyr: 0.1
+      cov_acc: 1.0
+      rdw_gyr: 0.0001
+      rdw_acc: 0.0001
+      down_size: 0.1
+      dept_err: 0.02
+      beam_err: 0.05
+      voxel_size: 1.0
+      min_eigen_value: 0.0025
+      degrade_bound: 10
+      point_notime: 0
+    LocalBA:
+      win_size: 10
+      max_layer: 2
+      cov_gyr: 0.01
+      cov_acc: 2.0
+      rdw_gyr: 0.0001
+      rdw_acc: 0.0001
+      min_ba_point: 1
+      plane_eigen_value_thre: [4.0, 4.0, 4.0, 4.0]
+      imu_coef: 0.0002
+      thread_num: 5
+    Loop:
+      jud_default: 0.45
+      icp_eigval: 9.0
+      ratio_drift: 0.01
+    GBA:
+      voxel_size: 2.0
+      min_eigen_value: 0.01
+      eigen_value_array: [4.0, 4.0, 4.0, 4.0]
+      total_max_iter: 6
+    MapBlock:
+      size_x: 20.0
+      size_y: 20.0
+      size_z: 10.0
+      fusion_leaf_size: 0.1
+      root_voxel_size: 1.0
+      max_layer: 2
+      min_eigen_value: 0.0025
+      save_display_cloud: false

@@ -1,0 +1,10 @@
+/**:
+  ros__parameters:
+    imu_odom_topic: /LIO/odom_imu
+    vehicle_odom_topic: /LIO/odom_vehicle
+    imu_frame: aft_mapped
+    base_frame: base_link
+    localization_valid_topic: /localization/valid
+    require_localization_valid: true
+    tf_timeout_sec: 0.2
+    input_timeout_sec: 0.2

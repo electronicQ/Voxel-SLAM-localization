@@ -41,7 +41,7 @@ void pub_pl_func(T &pl, ros::Publisher &pub)
 
 mutex mBuf;
 Features feat;
-deque<sensor_msgs::Imu::Ptr> imu_buf;
+deque<sensor_msgs::msg::Imu::SharedPtr> imu_buf;
 deque<pcl::PointCloud<PointType>::Ptr> pcl_buf;
 deque<double> time_buf;
 
@@ -78,7 +78,7 @@ void pcl_handler(T &msg)
   mBuf.unlock();
 }
 
-bool sync_packages(pcl::PointCloud<PointType>::Ptr &pl_ptr, deque<sensor_msgs::Imu::Ptr> &imus, IMUEKF &p_imu)
+bool sync_packages(pcl::PointCloud<PointType>::Ptr &pl_ptr, deque<sensor_msgs::msg::Imu::SharedPtr> &imus, IMUEKF &p_imu)
 {
   static bool pl_ready = false;
 
@@ -118,7 +118,7 @@ bool sync_packages(pcl::PointCloud<PointType>::Ptr &pl_ptr, deque<sensor_msgs::I
 
     while(!imu_buf.empty())
     {
-      const double imu_time = imu_buf.front()->header.stamp.toSec();
+      const double imu_time = rclcpp::Time(imu_buf.front()->header.stamp).seconds();
       // Preserve the original batching boundary: the IMU sample exactly at
       // the scan end belongs to this scan; only a later sample stays queued.
       if(imu_time > p_imu.pcl_end_time) break;
@@ -273,4 +273,3 @@ void icp_check(pcl::PointCloud<PointType> &pl_src, pcl::PointCloud<PointType> &p
   }
   pub_pl_func(pl1, pub_src); pub_pl_func(pl2, pub_tar);
 }
-

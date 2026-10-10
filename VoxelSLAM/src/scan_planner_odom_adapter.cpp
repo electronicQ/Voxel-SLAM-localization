@@ -28,7 +28,7 @@ bool sameFrame(std::string left, std::string right) {
   return !left.empty() && left == right;
 }
 
-void markCovarianceUnavailable(boost::array<double, 36> &covariance) {
+void markCovarianceUnavailable(std::array<double, 36> &covariance) {
   std::fill(covariance.begin(), covariance.end(), 0.0);
   covariance[0] = -1.0;
 }
@@ -70,19 +70,19 @@ class ScanPlannerOdomAdapter {
     vehicle_odom_publisher_ =
         node_.advertise<nav_msgs::Odometry>(vehicle_odom_topic_, 1000);
     if (require_localization_valid_) {
-      localization_valid_subscriber_ = node_.subscribe(
+      localization_valid_subscriber_ = node_.subscribe<std_msgs::msg::Bool>(
           localization_valid_topic_, 10,
           &ScanPlannerOdomAdapter::localizationValidCallback, this);
     } else {
       localization_valid_ = true;
     }
-    imu_odom_subscriber_ = node_.subscribe(
+    imu_odom_subscriber_ = node_.subscribe<nav_msgs::msg::Odometry>(
         imu_odom_topic_, 1000,
         &ScanPlannerOdomAdapter::imuOdomCallback, this);
   }
 
  private:
-  void localizationValidCallback(const std_msgs::Bool::ConstPtr &message) {
+  void localizationValidCallback(const std_msgs::msg::Bool::ConstSharedPtr &message) {
     if (message) localization_valid_ = message->data;
   }
 
@@ -130,12 +130,12 @@ class ScanPlannerOdomAdapter {
 
   bool convertInput(const nav_msgs::Odometry &message,
                     VehicleOdomState &state) const {
-    const geometry_msgs::Point &position = message.pose.pose.position;
-    const geometry_msgs::Quaternion &orientation =
+    const geometry_msgs::msg::Point &position = message.pose.pose.position;
+    const geometry_msgs::msg::Quaternion &orientation =
         message.pose.pose.orientation;
     Eigen::Quaterniond quaternion(orientation.w, orientation.x,
                                   orientation.y, orientation.z);
-    state.t = message.header.stamp.toSec();
+    state.t = rclcpp::Time(message.header.stamp).seconds();
     state.p = Eigen::Vector3d(position.x, position.y, position.z);
     state.v_world = Eigen::Vector3d(message.twist.twist.linear.x,
                                     message.twist.twist.linear.y,
@@ -154,7 +154,7 @@ class ScanPlannerOdomAdapter {
     return finiteMatrix(state.R);
   }
 
-  void imuOdomCallback(const nav_msgs::Odometry::ConstPtr &message) {
+  void imuOdomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr &message) {
     if (!message) return;
     if (!sameFrame(message->child_frame_id, imu_frame_)) {
       ROS_WARN_STREAM_THROTTLE(
@@ -170,7 +170,7 @@ class ScanPlannerOdomAdapter {
     }
 
     const ros::Time now = ros::Time::now();
-    if (!now.isZero() && !message->header.stamp.isZero()) {
+    if (!now.isZero() && !ros::Time(rclcpp::Time(message->header.stamp)).isZero()) {
       const double age = (now - message->header.stamp).toSec();
       if (std::isfinite(age) && age > input_timeout_sec_) {
         ROS_WARN_STREAM_THROTTLE(

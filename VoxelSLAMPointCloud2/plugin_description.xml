@@ -1,10 +1,7 @@
-<library path="lib/libvoxelslam_pointcloud2">
+<library path="voxelslam_pointcloud2">
   <class name="voxelslam_pointcloud2/VoxelSLAMPointCloud2"
          type="voxelslam_pointcloud2::PointCloud2Display"
-         base_class_type="rviz::Display">
-    <description>
-      Displays direction and scale of accelerations from sensor_msgs/Imu messages.
-    </description>
-    <message_type>sensor_msgs/PointCloud2</message_type>
+         base_class_type="rviz_common::Display">
+    <description>PointCloud2 display with invalid-point filtering.</description>
   </class>
 </library>

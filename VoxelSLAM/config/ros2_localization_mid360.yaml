@@ -1,0 +1,71 @@
+/**:
+  ros__parameters:
+    General:
+      mode: localization
+      map_export_path: ''
+      lid_topic: /livox/lidar
+      imu_topic: /livox/imu
+      save_path: /tmp/voxel_slam/save_datas/
+      bagname: mid360_localization
+      lidar_type: 0
+      blind: 0.5
+      point_filter_num: 3
+      extrinsic_tran: [-0.011, -0.02329, 0.04412]
+      extrinsic_rota: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+      is_save_map: 0
+    Localization:
+      map_path: ''
+      spatial_map:
+        preload_radius: 15.0
+        load_radius: 30.0
+        unload_radius: 40.0
+        prefetch_time_sec: 2.0
+        map_gap_timeout_sec: 1.0
+        preload_timeout_sec: 10.0
+        max_background_loads: 2
+      use_prior_pose_for_btc: true
+      btc_prior_pose:
+        x: 0.0
+        y: 0.0
+      btc_search_radius: 30.0
+      btc_expand_on_failure: true
+      btc_max_search_radius: 100.0
+      btc_fallback_to_global: true
+      rviz_initialpose_enabled: true
+      direct_pose_validation_scans: 3
+      direct_pose_validation_timeout_sec: 5.0
+      tracking_min_matched_points: 50
+      tracking_max_mean_abs_point_plane: 0.5
+      tracking_min_normal_eigenvalue: 14.0
+      lost_bad_scan_limit: 5
+      alignment_max_translation_m: 1000.0
+      alignment_max_rotation_deg: 180.0
+    Odometry:
+      imu_rate_output: true
+      imu_odom_topic: /LIO/odom_imu
+      odom_frame: camera_init
+      imu_child_frame: aft_mapped
+      publish_before_localized: false
+      max_prediction_sec: 0.5
+      cov_gyr: 0.1
+      cov_acc: 1.0
+      rdw_gyr: 0.0001
+      rdw_acc: 0.0001
+      down_size: 0.1
+      dept_err: 0.02
+      beam_err: 0.05
+      voxel_size: 1.0
+      min_eigen_value: 0.0025
+      degrade_bound: 10
+      point_notime: 0
+    LocalBA:
+      win_size: 10
+      max_layer: 2
+      cov_gyr: 0.01
+      cov_acc: 2.0
+      rdw_gyr: 0.0001
+      rdw_acc: 0.0001
+      min_ba_point: 1
+      plane_eigen_value_thre: [4.0, 4.0, 4.0, 4.0]
+      imu_coef: 0.0002
+      thread_num: 5

@@ -68,3 +68,6 @@ rosrun tf tf_echo aft_mapped base_link
 ```
 
 当前 Windows 修改环境只能执行 Python 源码契约和配置检查，不能代替以上 ROS/C++ 验证。
+# ROS 2 Humble
+
+本分支使用 `ament_cmake`、`colcon`、`tf2`、`rosbag2` 和 RViz2。完整构建与运行命令见仓库根目录 [`ROS2_HUMBLE.md`](../ROS2_HUMBLE.md)。
