@@ -10,6 +10,7 @@
 #include <pcl/io/pcd_io.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -53,19 +54,19 @@ std::string trim(const std::string &value) {
 }
 
 bool parseInt(const std::string &text, int &value) {
-  std::istringstream input(text);
-  input.imbue(std::locale::classic());
-  input >> value;
-  input >> std::ws;
-  return input && input.eof();
+  const char *begin = text.data();
+  const char *end = begin + text.size();
+  const auto result = std::from_chars(begin, end, value);
+  return result.ec == std::errc() && result.ptr == end;
 }
 
 bool parseDouble(const std::string &text, double &value) {
-  std::istringstream input(text);
-  input.imbue(std::locale::classic());
-  input >> value;
-  input >> std::ws;
-  return input && input.eof() && std::isfinite(value);
+  const char *begin = text.data();
+  const char *end = begin + text.size();
+  const auto result =
+      std::from_chars(begin, end, value, std::chars_format::general);
+  return result.ec == std::errc() && result.ptr == end &&
+         std::isfinite(value);
 }
 
 bool checkFinite(float value, const char *name, std::string &error) {

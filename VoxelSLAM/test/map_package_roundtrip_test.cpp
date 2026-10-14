@@ -64,7 +64,7 @@ SavedKeyframe makeKeyframe(int id, double stamp, const Eigen::Matrix3d &R,
   keyframe.pose.R = R;
   keyframe.pose.t = t;
   keyframe.cloud.reset(new pcl::PointCloud<PointType>());
-  keyframe.cloud->points = points;
+  keyframe.cloud->points.assign(points.begin(), points.end());
   keyframe.cloud->width = static_cast<std::uint32_t>(points.size());
   keyframe.cloud->height = 1;
   keyframe.cloud->is_dense = true;

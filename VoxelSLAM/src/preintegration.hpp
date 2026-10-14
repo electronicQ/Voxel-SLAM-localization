@@ -2,6 +2,7 @@
 
 #include "tools.hpp"
 #include <deque>
+#include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/Imu.h>
 
 // Don't forget to init

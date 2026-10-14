@@ -22,6 +22,12 @@ public:
                   const std::string &frame_id, const std::string &child_frame_id)
       : Transform(transform), stamp_(stamp.native()), frame_id_(frame_id),
         child_frame_id_(child_frame_id) {}
+  StampedTransform(const Transform &transform,
+                   const builtin_interfaces::msg::Time &stamp,
+                   const std::string &frame_id,
+                   const std::string &child_frame_id)
+      : Transform(transform), stamp_(rclcpp::Time(stamp)), frame_id_(frame_id),
+        child_frame_id_(child_frame_id) {}
 
   const rclcpp::Time &stamp() const { return stamp_; }
   const std::string &frame_id() const { return frame_id_; }

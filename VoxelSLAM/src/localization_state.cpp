@@ -1,6 +1,7 @@
 #include "localization_state.hpp"
 
 #include <Eigen/Geometry>
+#include <Eigen/LU>
 
 #include <algorithm>
 #include <cmath>
@@ -15,7 +16,8 @@ bool fail(std::string &error, const std::string &message) {
 
 bool validRotation(const Eigen::Matrix3d &rotation) {
   return rotation.array().isFinite().all() &&
-         rotation.transpose().isApprox(Eigen::Matrix3d::Identity(), 1e-6) &&
+         (rotation.transpose() * rotation)
+             .isApprox(Eigen::Matrix3d::Identity(), 1e-6) &&
          std::abs(rotation.determinant() - 1.0) <= 1e-6;
 }
 

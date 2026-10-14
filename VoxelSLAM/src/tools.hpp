@@ -19,7 +19,7 @@
 typedef pcl::PointXYZINormal PointType;
 using namespace std;
 
-Eigen::Matrix3d I33(Eigen::Matrix3d::Identity());
+inline Eigen::Matrix3d I33 = Eigen::Matrix3d::Identity();
 
 class VOXEL_LOC
 {
@@ -48,7 +48,7 @@ namespace std
   };
 }
 
-Eigen::Matrix3d Exp(const Eigen::Vector3d &ang)
+inline Eigen::Matrix3d Exp(const Eigen::Vector3d &ang)
 {
   double ang_norm = ang.norm();
   // if (ang_norm > 0.00001)
@@ -65,7 +65,7 @@ Eigen::Matrix3d Exp(const Eigen::Vector3d &ang)
   
 }
 
-Eigen::Matrix3d Exp(const Eigen::Vector3d &ang_vel, const double &dt)
+inline Eigen::Matrix3d Exp(const Eigen::Vector3d &ang_vel, const double &dt)
 {
   double ang_vel_norm = ang_vel.norm();
   if (ang_vel_norm > 1e-7)
@@ -83,14 +83,14 @@ Eigen::Matrix3d Exp(const Eigen::Vector3d &ang_vel, const double &dt)
   return I33;
 }
 
-Eigen::Vector3d Log(const Eigen::Matrix3d &R)
+inline Eigen::Vector3d Log(const Eigen::Matrix3d &R)
 {
   double theta = (R.trace() > 3.0 - 1e-6) ? 0.0 : std::acos(0.5 * (R.trace() - 1));
   Eigen::Vector3d K(R(2,1) - R(1,2), R(0,2) - R(2,0), R(1,0) - R(0,1));
   return (std::abs(theta) < 0.001) ? (0.5 * K) : (0.5 * theta / std::sin(theta) * K);
 }
 
-Eigen::Matrix3d hat(const Eigen::Vector3d &v)
+inline Eigen::Matrix3d hat(const Eigen::Vector3d &v)
 {
   Eigen::Matrix3d Omega;
   Omega <<  0, -v(2),  v(1)
@@ -99,7 +99,7 @@ Eigen::Matrix3d hat(const Eigen::Vector3d &v)
   return Omega;
 }
 
-Eigen::Matrix3d jr(Eigen::Vector3d vec)
+inline Eigen::Matrix3d jr(Eigen::Vector3d vec)
 {
   double ang = vec.norm();
 
@@ -115,7 +115,7 @@ Eigen::Matrix3d jr(Eigen::Vector3d vec)
   }
 }
 
-Eigen::Matrix3d jr_inv(const Eigen::Matrix3d &rotR)
+inline Eigen::Matrix3d jr_inv(const Eigen::Matrix3d &rotR)
 {
   Eigen::AngleAxisd rot_vec(rotR);
   Eigen::Vector3d axi = rot_vec.axis();
@@ -198,7 +198,7 @@ struct IMUST
 
 };
 
-void down_sampling_voxel(pcl::PointCloud<PointType> &pl_feat, double voxel_size)
+inline void down_sampling_voxel(pcl::PointCloud<PointType> &pl_feat, double voxel_size)
 {
   if(voxel_size < 0.001) return;
 
@@ -237,7 +237,7 @@ void down_sampling_voxel(pcl::PointCloud<PointType> &pl_feat, double voxel_size)
   
 }
 
-void down_sampling_close(pcl::PointCloud<PointType> &pl_feat, double voxel_size)
+inline void down_sampling_close(pcl::PointCloud<PointType> &pl_feat, double voxel_size)
 {
   if(voxel_size < 0.001) return;
 

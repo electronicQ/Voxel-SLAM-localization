@@ -9,6 +9,7 @@
 #include <gtsam/slam/PriorFactor.h>
 
 #include <Eigen/Geometry>
+#include <Eigen/LU>
 
 #include <cmath>
 #include <cstddef>
@@ -27,7 +28,7 @@ bool validRotation(const Eigen::Matrix3d &rotation) {
   if (!rotation.array().isFinite().all()) {
     return false;
   }
-  return rotation.transpose()
+  return (rotation.transpose() * rotation)
              .isApprox(Eigen::Matrix3d::Identity(), 1e-6) &&
          std::abs(rotation.determinant() - 1.0) <= 1e-6;
 }

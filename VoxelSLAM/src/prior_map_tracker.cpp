@@ -141,11 +141,11 @@ bool PriorMapTracker::nearest_height_xy(const Eigen::Vector2d &center,
                                         double &height, int &keyframe_id,
                                         std::string &error) const {
   error.clear();
-  if (!index_state_) {
-    return fail(error, "prior-map indexes are not initialized");
-  }
   if (!center.array().isFinite().all()) {
     return fail(error, "nearest-height XY query must be finite");
+  }
+  if (!index_state_) {
+    return fail(error, "prior-map indexes are not initialized");
   }
 
   pcl::PointXYZ query;
