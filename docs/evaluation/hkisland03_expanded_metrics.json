@@ -1,0 +1,124 @@
+{
+  "summary": {
+    "failure": null,
+    "imu_count": 71074,
+    "odometry_count": 65833,
+    "first_stamp": 1669702567.5018601,
+    "last_stamp": 1669702908.098048,
+    "states": [
+      [
+        18537.777728985,
+        null,
+        "WAITING_FOR_MAP"
+      ],
+      [
+        18539.124922381,
+        null,
+        "LOCAL_ODOMETRY"
+      ],
+      [
+        18561.524312691,
+        1669702587.697999,
+        "RELOCALIZING"
+      ],
+      [
+        18561.524944338,
+        1669702587.697999,
+        "LOCAL_ODOMETRY"
+      ],
+      [
+        18562.525826449,
+        1669702588.6980019,
+        "RELOCALIZING"
+      ],
+      [
+        18562.526223009,
+        1669702588.6980019,
+        "LOCAL_ODOMETRY"
+      ],
+      [
+        18563.531729683,
+        1669702589.6989172,
+        "RELOCALIZING"
+      ],
+      [
+        18563.532461065,
+        1669702589.6989172,
+        "LOCAL_ODOMETRY"
+      ],
+      [
+        18564.44046964,
+        1669702590.599967,
+        "RELOCALIZING"
+      ],
+      [
+        18564.441453918,
+        1669702590.599967,
+        "LOCAL_ODOMETRY"
+      ],
+      [
+        18565.488096041,
+        1669702591.5999749,
+        "RELOCALIZING"
+      ],
+      [
+        18565.501072121,
+        1669702591.696022,
+        "ALIGNING"
+      ],
+      [
+        18565.507874203,
+        1669702591.696022,
+        "PREPARING_LOCAL_MAP"
+      ],
+      [
+        18565.905487933,
+        1669702592.100928,
+        "IN_MAP_TRACKING"
+      ]
+    ],
+    "valid_events": [
+      [
+        18537.777923703,
+        null,
+        false
+      ],
+      [
+        18565.905660093,
+        1669702592.100928,
+        true
+      ]
+    ],
+    "map_unchanged": true
+  },
+  "trajectory": {
+    "matched_poses": 276,
+    "rpe_pairs": 275,
+    "ate_rmse_m": 0.05368504067166143,
+    "rpe_translation_rmse_m": 0.041214428843929125,
+    "rpe_rotation_rmse_deg": 0.1551694246925344
+  },
+  "runtime": {
+    "samples": 3141,
+    "spatial_active_blocks_max": 250,
+    "spatial_pending_blocks_max": 1,
+    "spatial_core_ready_ratio": 1.0,
+    "spatial_load_ms_mean": 6.013356736925512,
+    "spatial_load_ms_p95": 16.0975,
+    "spatial_load_ms_max": 27.8661,
+    "spatial_match_ms_mean": 50.02671160776828,
+    "spatial_match_ms_p95": 82.6519,
+    "spatial_match_ms_max": 93.2438,
+    "frame_ms_mean": 58.042412639286816,
+    "frame_ms_p95": 92.1483,
+    "frame_ms_max": 104.047,
+    "memory_mb_peak": 73.5517
+  },
+  "first_valid_sec": 24.59906792640686,
+  "valid_duration_sec": 315.99711990356445,
+  "valid_ratio": 0.9277764437613526,
+  "lost_count": 0,
+  "position_difference_p95_m": 0.1012851332615365,
+  "position_difference_max_m": 0.19243216624928863,
+  "association_max_time_diff_sec": 0.0025429725646972656
+}

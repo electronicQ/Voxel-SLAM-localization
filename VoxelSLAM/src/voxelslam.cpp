@@ -2715,6 +2715,19 @@ public:
         else
           degrade_cnt++;
         last_tracking_quality = scan_quality;
+        if(!scan_update_good &&
+           (degrade_cnt == 1 || degrade_cnt % 25 == 0))
+          ROS_WARN_STREAM("Mapping tracking degraded: stamp="
+                          << std::fixed << odom_ekf.pcl_end_time
+                          << " count=" << degrade_cnt << "/" << degrade_bound
+                          << " points=" << pptr->size()
+                          << " matched=" << scan_quality.matched_points
+                          << " normal_min_eigen="
+                          << scan_quality.min_normal_eigenvalue
+                          << " required=14 residual="
+                          << scan_quality.mean_abs_point_plane
+                          << " finite=" << scan_quality.finite
+                          << " solved=" << scan_quality.solve_succeeded);
         if(scan_quality.solve_succeeded && scan_quality.finite)
           refresh_imu_rate_predictor_snapshot();
 
@@ -2745,6 +2758,13 @@ public:
 
         if(degrade_cnt > degrade_bound)
         {
+          ROS_WARN_STREAM("Mapping reset triggered by accumulated tracking "
+                          "degradation: stamp=" << std::fixed
+                          << odom_ekf.pcl_end_time << " count=" << degrade_cnt
+                          << " bound=" << degrade_bound
+                          << " matched=" << scan_quality.matched_points
+                          << " normal_min_eigen="
+                          << scan_quality.min_normal_eigenvalue);
           degrade_cnt = 0;
           system_reset(imus);
 

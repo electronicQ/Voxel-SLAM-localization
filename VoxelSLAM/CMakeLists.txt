@@ -36,6 +36,14 @@ if(NOT GTSAM_INCLUDE_DIRS AND GTSAM_INCLUDE_DIR)
   set(GTSAM_INCLUDE_DIRS ${GTSAM_INCLUDE_DIR})
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET gtsam)
+  # GTSAM builds can share a SONAME while differing in allocator/Eigen ABI.
+  # Keep the linked build ahead of conflicting LD_LIBRARY_PATH entries.
+  set(CMAKE_BUILD_RPATH "$<TARGET_FILE_DIR:gtsam>")
+  set(CMAKE_INSTALL_RPATH "$<TARGET_FILE_DIR:gtsam>")
+  add_link_options("LINKER:--disable-new-dtags")
+endif()
+
 set(VOXEL_SLAM_ROS_DEPENDENCIES
   rclcpp builtin_interfaces geometry_msgs nav_msgs sensor_msgs std_msgs
   visualization_msgs tf2 tf2_ros pcl_conversions)

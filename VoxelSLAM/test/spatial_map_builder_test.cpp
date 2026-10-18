@@ -332,6 +332,34 @@ TEST(SpatialMapBuilder, EmptyAndNonFiniteInputsFailAtomically) {
   EXPECT_TRUE(results_equal(output, sentinel));
 }
 
+TEST(SpatialMapBuilder, DistantTiltedPlanesHaveSymmetricCovariance) {
+  SpatialMapConfig config;
+  config.fusion_leaf_size = 0.05;
+  SpatialMapPointVector points;
+  for (int x = 0; x < 6; ++x) {
+    for (int y = 0; y < 6; ++y) {
+      points.push_back(test_point(-359.9 + 0.13 * x,
+                                  280.1 + 0.13 * y,
+                                  90.15 + 0.017 * x + 0.029 * y,
+                                  1e-4 * (1 + x + y)));
+    }
+  }
+  SpatialMapBuildResult result;
+  std::string error;
+  ASSERT_TRUE(SpatialMapBuilder::build(points, config, result, error)) << error;
+  std::size_t plane_count = 0;
+  for (const auto &block : result.blocks) {
+    for (const auto &plane : block.planes) {
+      ++plane_count;
+      EXPECT_NEAR(plane.normal.norm(), 1.0, 1e-6);
+      EXPECT_TRUE(plane.covariance.isApprox(plane.covariance.transpose(), 1e-9));
+      EXPECT_TRUE((plane.covariance.array() ==
+                   plane.covariance.transpose().array()).all());
+    }
+  }
+  EXPECT_GT(plane_count, 0U);
+}
+
 TEST(SpatialMapBuilder, StaticRepresentationUsesIndicesInsteadOfPointers) {
   static_assert(
       std::is_same<typename decltype(StaticOctreeNode{}.children)::value_type,

@@ -243,6 +243,9 @@ bool make_static_plane(const Eigen::Vector3d &center,
   plane.covariance.block<3, 3>(3, 3) =
       inverse_count * inverse_count *
       covariance_sum.block<3, 3>(6, 6);
+  // Covariance propagation is symmetric analytically; remove roundoff skew.
+  plane.covariance =
+      (0.5 * (plane.covariance + plane.covariance.transpose())).eval();
   return vector_is_finite(plane.center) && vector_is_finite(plane.normal) &&
          matrix_is_finite(plane.covariance) &&
          std::isfinite(plane.radius) && plane.radius >= 0.0;

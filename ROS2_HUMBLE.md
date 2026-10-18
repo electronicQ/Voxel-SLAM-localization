@@ -18,6 +18,12 @@ colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
 source install/setup.bash
 ```
 
+若工作空间中同时有 `third_party/install/gtsam` 和 `install/gtsam`，必须
+保持编译和运行所用的 GTSAM 一致。即使都是 4.2，不同的 TBB 分配器或
+Eigen 配置也可能造成 `NonlinearFactor::rekey` 等符号无法解析。本项目在
+Linux 下使用 RPATH 固定 CMake 选中的 GTSAM 库，防止被另一份同名库覆盖。
+更换 GTSAM 时应同步更新 `GTSAM_DIR` 和缓存的 `GTSAM_INCLUDE_DIR`，然后重新构建。
+
 没有 Livox 驱动时，节点仍可订阅标准 `sensor_msgs/msg/PointCloud2`，但不会解析 Livox 自定义点时间字段。
 
 ## 建图
@@ -42,6 +48,18 @@ ros2 topic echo /localization/state
 ros2 topic echo /localization/valid
 ros2 topic hz /LIO/odom_imu
 ```
+
+Avia 飞行数据及其对应地图使用专用启动文件，保留建图时的 Avia 外参和
+高空 BTC 描述子设置：
+
+```bash
+ros2 launch voxel_slam vxlm_localization_avia_fly.launch.py \
+  map_path:=/absolute/path/to/HKisland03_localization rviz:=true
+```
+
+该配置的空间块核心/加载/卸载半径为 100/120/150 米。HKisland03 的飞行
+轨迹到最近地图块的距离可达约 86.5 米，因此不适合直接使用 Mid360
+配置中的 15/30/40 米范围。地图中的融合网格和根体素参数仍由地图包读取。
 
 RViz2 的 `SetInitialPose` 工具发布 `/initialpose`，固定坐标系为 `camera_init`。
 
